@@ -231,7 +231,7 @@ my-hermes
   model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning  provider: nvidia-prod
 ```
 
-If you skip step 2 or 3, the model name in `nemoclaw list` and the Hermes TUI banner will lie about what's actually running. The gateway route (step 1) is what determines real behavior; steps 2 and 3 are display-only.
+Step 1 is the only step that changes runtime behavior — it points the gateway at the Omni model. Steps 2 and 3 update display labels (the Hermes TUI banner and `nemoclaw list` output) so they match what the gateway is now serving. If you skip step 2 or 3, Omni still runs correctly, but the labels will keep showing Super 120B until you fix them.
 
 ### Part 4 — Clone the cookbook, set the SANDBOX env var
 
