@@ -146,6 +146,9 @@ export DOCKER_CTR=openshell-cluster-nemoclaw
 export NVIDIA_API_KEY=nvapi-...   # must have Omni access
 ```
 
+> These are shell-local. If your SSH session drops or you open a new terminal
+> partway through, re-run the `export` commands before continuing.
+
 NemoClaw may not leave a plaintext `~/.nemoclaw/credentials.json` on current
 releases, so do not rely on sourcing that file. Keep the key in your shell only
 for the setup step. The helper streams it into the in-sandbox OpenClaw provider

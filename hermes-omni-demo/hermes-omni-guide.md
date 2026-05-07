@@ -230,7 +230,7 @@ my-hermes
   model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning  provider: nvidia-prod
 ```
 
-Step 1 changes the runtime route, so it determines which model the sandbox actually calls. If you skip step 1, the demo is still using the model selected during onboarding. Steps 2 and 3 only keep labels in sync: if you run step 1 but skip either label update, Omni may be running correctly while the Hermes TUI banner or `nemoclaw list` still shows the old Super model.
+Step 1 changes the runtime behavior — it points the gateway at the Omni model, determining which model the sandbox actually calls. If you skip step 1, the demo is still using the model selected during onboarding. Steps 2 and 3 only keep labels in sync: if you run step 1 but skip either label update, Omni may be running correctly while the Hermes TUI banner or `nemoclaw list` still shows the old Super model.
 
 ### Part 4 — Clone the cookbook, set the SANDBOX env var
 
