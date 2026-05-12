@@ -454,7 +454,10 @@ if [ "${LIVE_COUNT:-0}" -eq 0 ]; then
   # Some legacy code paths still look for NVIDIA_API_KEY by name; stage the
   # same key there too so any incidental check finds a value.
   export NVIDIA_API_KEY="${INFERENCE_API_KEY}"
-  nemoclaw onboard --non-interactive
+  # Non-interactive onboarding refuses to run without explicit acceptance of
+  # the upstream third-party-software notice; the flag is required by design.
+  export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
+  nemoclaw onboard --non-interactive --yes-i-accept-third-party-software
   ok "Onboarding complete"
 
   info "Waiting for sandbox to become ready..."
