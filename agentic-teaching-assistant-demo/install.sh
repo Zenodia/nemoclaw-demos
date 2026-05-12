@@ -87,29 +87,30 @@ docker info          >/dev/null 2>&1 || fail "Docker daemon is not running. Star
 # Compose v2 must be present as a docker CLI plugin — `make up` later runs
 # `docker compose up -d`.  Without the plugin docker parses the args as
 # `docker -d ...` and aborts with a cryptic "unknown shorthand flag" error.
-# Auto-install via apt (Ubuntu/Debian) if missing; otherwise fail with a
-# manual-install hint.
+# If missing, drop the official release binary into ~/.docker/cli-plugins/
+# (per-user install — no sudo, no apt repo, works on any Linux).
 if ! docker compose version >/dev/null 2>&1; then
-  warn "docker compose v2 plugin not found — installing..."
-  if command -v apt-get >/dev/null 2>&1; then
-    if sudo -n true 2>/dev/null || [ "$(id -u)" = "0" ]; then
-      sudo apt-get update -qq \
-        && sudo apt-get install -y -qq docker-compose-plugin \
-        || fail "apt-get install docker-compose-plugin failed. Install manually and retry."
-    else
-      info "sudo password required to install docker-compose-plugin..."
-      sudo apt-get update -qq \
-        && sudo apt-get install -y -qq docker-compose-plugin \
-        || fail "apt-get install docker-compose-plugin failed. Install manually and retry."
-    fi
-  else
-    fail "docker compose v2 plugin missing and no apt-get available. \
-Install manually — see https://docs.docker.com/compose/install/linux/"
-  fi
+  warn "docker compose v2 plugin not found — installing per-user binary..."
+  command -v curl >/dev/null 2>&1 \
+    || fail "curl not found — required to download docker-compose-plugin."
+  _arch=$(uname -m)
+  case "$_arch" in
+    x86_64|amd64)         _compose_arch="x86_64" ;;
+    aarch64|arm64)        _compose_arch="aarch64" ;;
+    armv7l|armv7)         _compose_arch="armv7" ;;
+    *)                    fail "Unsupported CPU arch for docker compose binary: $_arch" ;;
+  esac
+  _plugin_dir="$HOME/.docker/cli-plugins"
+  _plugin_path="$_plugin_dir/docker-compose"
+  _compose_url="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${_compose_arch}"
+  mkdir -p "$_plugin_dir"
+  info "Downloading $(basename "$_compose_url") → $_plugin_path"
+  curl -fsSL "$_compose_url" -o "$_plugin_path" \
+    || fail "Failed to download docker-compose binary from $_compose_url"
+  chmod +x "$_plugin_path"
   docker compose version >/dev/null 2>&1 \
-    || fail "docker compose still not callable after install. \
-Check that /usr/libexec/docker/cli-plugins/docker-compose exists and is executable."
-  ok "docker-compose-plugin installed"
+    || fail "docker compose still not callable after install. Check $_plugin_path is executable."
+  ok "docker-compose-plugin installed at $_plugin_path"
 fi
 command -v make      >/dev/null 2>&1 || fail "make not found."
 command -v python3   >/dev/null 2>&1 || fail "python3 not found."
