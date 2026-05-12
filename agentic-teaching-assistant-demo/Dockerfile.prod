@@ -1,0 +1,114 @@
+# Production Dockerfile for AgenticTA Frontend
+# Build: docker build -f Dockerfile.prod -t agenticta-frontend:latest .
+#        OR use: ./build-frontend.sh [VERSION]
+# Push:  ./push-frontend.sh [VERSION]
+#        OR use: ./build-and-push-frontend.sh [VERSION]
+#
+# Image registry: artifactory.nvidia.com/it-astra-docker-local/agenticta/frontend
+
+FROM python:3.12-slim
+
+# Set timezone and Python config
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe/Stockholm
+ENV PYTHONUNBUFFERED=1
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Install system dependencies
+RUN apt-get update -y && \
+    apt-get install -y procps curl gnupg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (for newFrontEndUI)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /workspace
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
+# Install Python dependencies (copy only requirements.txt first for better caching)
+COPY requirements.txt /workspace/
+RUN pip install -r requirements.txt
+
+# Note: Most packages now in requirements.txt
+# Only install packages not in requirements.txt or that need specific versions
+RUN pip install --no-cache-dir \
+    "gradio>=4.44.0,<6.0.0"
+
+# Copy application code into image
+# (Order matters for Docker layer caching)
+
+# Core Python files (root directory)
+COPY *.py /workspace/
+
+# Configuration files (non-sensitive)
+COPY llm_config.yaml /workspace/
+COPY pytest.ini /workspace/
+COPY logging_config.py /workspace/
+COPY docker-compose.yml /workspace/
+
+# Application modules (internal only)
+# Note: Copying in this order to maximize cache efficiency
+COPY common/ /workspace/common/
+COPY llm/ /workspace/llm/
+COPY scripts/ /workspace/scripts/
+COPY api/ /workspace/api/
+COPY frontendUI/ /workspace/frontendUI/
+
+# Install newFrontEndUI dependencies (cached if package-lock doesn't change)
+RUN mkdir -p /workspace/newFrontEndUI
+COPY newFrontEndUI/package.json /workspace/newFrontEndUI/
+COPY newFrontEndUI/package-lock.json /workspace/newFrontEndUI/
+RUN cd /workspace/newFrontEndUI && npm ci
+
+# Copy newFrontEndUI source and build for production
+COPY newFrontEndUI/ /workspace/newFrontEndUI/
+
+# Set environment variables for Vite build (these get embedded at build time)
+# VITE_API_URL:
+#   - Empty string = same-origin (for staging/prod deployments)
+#   - http://localhost:8000 = local docker (Makefile passes this)
+#   - Can be overridden with --build-arg VITE_API_URL=...
+ARG VITE_GAMES_URL=https://agenticta.stg.astra.nvidia.com/games
+ARG VITE_API_URL=
+ENV VITE_GAMES_URL=${VITE_GAMES_URL}
+ENV VITE_API_URL=${VITE_API_URL}
+
+RUN cd /workspace/newFrontEndUI && npm run build
+
+# Install serve for static file serving in production
+RUN npm install -g serve
+
+COPY services/ /workspace/services/
+
+# Copy vault last to ensure fresh copy (includes token_manager.py, client.py, config.py, etc.)
+COPY vault/ /workspace/vault/
+
+# External modules (rag/, study_buddy_agent/) not included - external dependencies
+# Tests not included - blocked by .dockerignore and not needed in production
+
+# Documentation (optional, but useful)
+COPY docs/ /workspace/docs/
+COPY README.md QUICKSTART.md SETUP_GUIDE.md /workspace/
+
+# Create directories for runtime data
+RUN mkdir -p /workspace/mnt/pdfs /workspace/volumes /workspace/logs
+
+# Expose ports
+EXPOSE 7860 8000 8080 8888 9999 7861 60808
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:7860/ || exit 1
+
+# Default command (can be overridden at runtime)
+RUN chmod +x /workspace/scripts/start_frontend.sh
+CMD ["/workspace/scripts/start_frontend.sh"]
+

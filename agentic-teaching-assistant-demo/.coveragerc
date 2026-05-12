@@ -1,0 +1,29 @@
+# Coverage configuration for pytest-cov
+[run]
+source = .
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */rag/*
+    */study_buddy_agent/*
+    */self_refine/*
+    */src/*
+    */.venv/*
+    */venv/*
+    setup.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+
+[html]
+directory = htmlcov
+

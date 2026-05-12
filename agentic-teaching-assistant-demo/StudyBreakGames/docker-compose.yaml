@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  study-break-games:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: study-break-games
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production

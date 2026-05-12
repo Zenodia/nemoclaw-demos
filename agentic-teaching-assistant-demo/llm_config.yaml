@@ -1,0 +1,202 @@
+# LLM Configuration File
+# This file defines providers (infrastructure) and use cases (application logic)
+
+# ============================================
+# PROVIDERS (Infrastructure Layer)
+# ============================================
+# Define how to connect to different LLM services
+
+providers:
+  # NVIDIA Inference Hub (inference-api.nvidia.com) - primary inference endpoint
+  nvidia_inference:
+    type: nvidia
+    base_url: https://inference-api.nvidia.com/v1
+    api_key_env: INFERENCE_API_KEY
+    models:
+      gpt_5_2: openai/openai/gpt-5.2
+      gpt_5_nano: openai/openai/gpt-5-nano
+      claude_opus_4_5: aws/anthropic/claude-opus-4-5
+      nemotron_nano_12b: nvidia/nvidia/nemotron-nano-12b-v2-vl
+      gemini_3_flash: gcp/google/gemini-3-flash-preview
+      gemini_3_pro: gcp/google/gemini-3-pro
+      # Capability aliases
+      fast: gcp/google/gemini-3-flash-preview
+      powerful: openai/openai/gpt-5.2
+      reasoning: openai/openai/gpt-5-nano
+    rate_limit: 100/min
+    description: "Models via NVIDIA Inference Hub (GPT-5, Claude Opus 4.5, Gemini 3, Nemotron)"
+
+  # OpenAI (commented out - for future use)
+  # openai:
+  #   type: openai
+  #   api_key_env: OPENAI_API_KEY
+  #   models:
+  #     default: gpt-4o
+  #     fast: gpt-4o-mini
+  #     powerful: gpt-4o
+  #     reasoning: o1-preview
+  
+  # Anthropic Claude (commented out - for future use)
+  # anthropic:
+  #   type: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   models:
+  #     default: claude-3-5-sonnet-20241022
+  #     fast: claude-3-5-haiku-20241022
+  #     powerful: claude-3-5-sonnet-20241022
+
+# ============================================
+# USE CASES (Application Layer)
+# ============================================
+# Define what to use for specific application tasks
+
+use_cases:
+  # ------------------------------------------
+  # Curriculum Generation
+  # ------------------------------------------
+  
+  chapter_title_generation:
+    type: llm
+    provider: nvidia_inference
+    model: fast
+    max_tokens: 1024
+    temperature: 0.7
+    description: "Generate main chapter titles from sub-chapters"
+    system_prompt: "You are an expert in generating concise, descriptive chapter titles for educational materials."
+    
+  subtopic_title_generation:
+    type: llm
+    provider: nvidia_inference
+    model: fast
+    max_tokens: 512
+    temperature: 0.7
+    description: "Create sub-topic titles from document summaries"
+    system_prompt: "You condense document summaries into clear, concise sub-topic titles."
+    
+  curriculum_modification:
+    type: llm
+    provider: nvidia_inference
+    model: gpt_5_nano
+    max_tokens: 4096
+    temperature: 0.5
+    timeout: 120
+    description: "Merge/split/modify chapters based on user feedback"
+    system_prompt: "You are an expert curriculum designer who can restructure educational content based on user needs."
+
+  extract_sub_chapters:
+    type: llm
+    provider: nvidia_inference
+    model: gpt_5_nano
+    max_tokens: 36000
+    temperature: 0.3
+    timeout: 180
+    description: "Extract and structure sub-chapters from PDF documents"
+    system_prompt: "You are an expert at analyzing educational documents and extracting structured sub-chapters with clear topics and summaries."
+
+  query_decomposition:
+    type: llm
+    provider: nvidia_inference
+    model: fast
+    max_tokens: 36000
+    temperature: 0.3
+    description: "Decompose complex user queries into multi-step tool execution plans"
+
+  # ------------------------------------------
+  # Study Material Generation
+  # ------------------------------------------
+
+  study_material_generation:
+    type: llm
+    provider: nvidia_inference
+    model: gpt_5_nano
+    max_tokens: 65000
+    temperature: 0.6
+    timeout: 300  # 5 minutes - should be much faster with GPT-5 Nano
+    description: "Generate comprehensive study guides with examples and explanations"
+    system_prompt: "You are an expert educator who creates detailed, engaging study materials."
+    enable_streaming: true
+  
+  # ------------------------------------------
+  # Document Search & RAG
+  # ------------------------------------------
+  
+  document_search_rerank:
+    type: llm
+    provider: nvidia_inference
+    model: fast
+    max_tokens: 512
+    temperature: 0.3
+    description: "Rerank RAG search results for relevance"
+  
+  # ------------------------------------------
+  # MCP Services (External)
+  # ------------------------------------------
+  
+  quiz_generation:
+    type: mcp_service
+    endpoint: http://localhost:4777/mcp
+    tool_name: quiz_generating_pipeline
+    timeout: 120
+    description: "Generate quiz questions from PDF documents via MCP service"
+    
+  study_buddy_chat:
+    type: mcp_service
+    endpoint: http://localhost:4100/mcp
+    tool_name: study_buddy_response
+    timeout: 30
+    description: "Interactive AI study buddy for Q&A"
+    enable_streaming: true
+
+# ============================================
+# MEMORY CONFIGURATION
+# ============================================
+
+memory:
+  # Embedding model for memory vector search
+  embedding_model: nvidia/nv-embedqa-mistral-7b-v2
+  
+  # Number of conversation turns before summarization
+  max_turns_before_summary: 3
+  
+  # Number of relevant memories to retrieve
+  top_k_memories: 5
+  
+  # Enable memory management
+  enabled: true
+  
+  # Memory routing keywords (for deciding when to search memory)
+  routing_keywords:
+    - what
+    - when
+    - where
+    - who
+    - why
+    - how
+    - did
+    - was
+    - were
+    - have
+    - has
+    - can you remind
+    - remember
+    - earlier
+    - before
+    - previous
+    - last time
+    - we discussed
+
+# ============================================
+# GLOBAL DEFAULTS
+# ============================================
+
+defaults:
+  provider: nvidia_inference
+  temperature: 0.7
+  max_tokens: 4096
+  retry_attempts: 3
+  retry_backoff: 2
+  timeout: 30
+  enable_caching: false
+  cache_ttl: 3600
+  enable_metrics: false
+

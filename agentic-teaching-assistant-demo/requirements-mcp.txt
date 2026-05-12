@@ -1,0 +1,5 @@
+# Requirements for ai_teaching_assistant_mcp_server.py and mcp_client_test.py
+# Install with:  pip install -r requirements-mcp.txt
+
+fastmcp>=2.0.0
+httpx>=0.28.1
