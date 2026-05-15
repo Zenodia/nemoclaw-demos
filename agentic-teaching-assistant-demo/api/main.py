@@ -121,7 +121,7 @@ app.add_middleware(
 
 
 # Import and include routes
-from api.routes import auth, curriculum, chat, files, quiz, calendar, youtube, upload_ui, upload_image_ui
+from api.routes import auth, curriculum, chat, files, quiz, calendar, youtube, planner, upload_ui, upload_image_ui
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(curriculum.router, prefix="/api/curriculum", tags=["Curriculum"])
@@ -130,6 +130,7 @@ app.include_router(files.router, prefix="/api/files", tags=["Files"])
 app.include_router(quiz.router, prefix="/api/quiz", tags=["Quiz"])
 app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(youtube.router, prefix="/api/youtube", tags=["YouTube"])
+app.include_router(planner.router, prefix="/api/planner", tags=["Planner"])
 app.include_router(upload_ui.router, tags=["Upload UI"])
 app.include_router(upload_image_ui.router, tags=["Image Upload UI"])
 

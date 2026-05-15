@@ -60,13 +60,12 @@ _DEFAULT_USER_ID = _CONFIG.get("user_id", None)
 # ---------------------------------------------------------------------------
 
 # Per-tool timeouts (seconds). generate_curriculum streams SSE for up to
-# several minutes; chat tools / upload_pdf also need extra headroom.
+# several minutes; chat_message/upload_pdf also need extra headroom.
 _TOOL_TIMEOUTS: dict[str, float] = {
-    "generate_curriculum":   300.0,
-    "study_material_query":  120.0,
-    "chitchat":              120.0,
-    "supplement_query":      120.0,
-    "upload_pdf":            120.0,
+    "generate_curriculum": 300.0,
+    "plan_study_week":     180.0,
+    "chat_message":        120.0,
+    "upload_pdf":          120.0,
 }
 _DEFAULT_TIMEOUT = 60.0
 
@@ -148,25 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("get_curriculum", help="Retrieve current curriculum")
     p.add_argument("--user-id", **uid)
 
-    # ── Chat (per-intent — agent picks the tool, no host-side LLM router) ────
-    p = sub.add_parser(
-        "study_material_query",
-        help="Ask a question about the user's uploaded study material (RAG-backed)",
-    )
-    p.add_argument("--user-id", **uid)
-    p.add_argument("--message", required=True)
-
-    p = sub.add_parser(
-        "chitchat",
-        help="Friendly small-talk reply in the study-buddy persona",
-    )
-    p.add_argument("--user-id", **uid)
-    p.add_argument("--message", required=True)
-
-    p = sub.add_parser(
-        "supplement_query",
-        help="Answer a general/supplemental knowledge question (not from the PDFs)",
-    )
+    # ── Chat ─────────────────────────────────────────────────────────────────
+    p = sub.add_parser("chat_message", help="Send a message to the study buddy")
     p.add_argument("--user-id", **uid)
     p.add_argument("--message", required=True)
 
@@ -191,6 +173,32 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("book_calendar", help="Book a calendar study session")
     p.add_argument("--user-id", **uid)
     p.add_argument("--text", required=True, help="Natural language description of the session")
+
+    p = sub.add_parser("plan_study_week", help="Create an academic weekly study plan")
+    p.add_argument("--user-id", **uid)
+    p.add_argument("--request", default="Plan my week", help="Natural language planning request")
+    p.add_argument("--course-schedule", default="", help="Classes, labs, work, or recurring commitments")
+    p.add_argument(
+        "--assignment",
+        action="append",
+        default=[],
+        help="Assignment, exam, or deadline description. Repeat for multiple items.",
+    )
+    p.add_argument("--availability", default="", help="Free study windows or preferred study times")
+    p.add_argument("--timezone", default="Europe/Paris", help="IANA timezone, e.g. America/New_York")
+    p.add_argument("--start-date", default="", help="Optional YYYY-MM-DD start date")
+    p.add_argument("--days", type=int, default=7, help="Number of days to plan")
+    p.add_argument(
+        "--daily-study-limit-hours",
+        type=float,
+        default=3.0,
+        help="Maximum recommended study hours per day",
+    )
+    p.add_argument(
+        "--create-calendar-events",
+        action="store_true",
+        help="Include ICS content for each planned study block",
+    )
 
     p = sub.add_parser("youtube_search", help="Search YouTube for educational videos")
     p.add_argument("--query", required=True)
@@ -243,13 +251,7 @@ def main() -> None:
     elif tool == "get_curriculum":
         tool_args = {"user_id": args.user_id}
 
-    elif tool == "study_material_query":
-        tool_args = {"user_id": args.user_id, "message": args.message}
-
-    elif tool == "chitchat":
-        tool_args = {"user_id": args.user_id, "message": args.message}
-
-    elif tool == "supplement_query":
+    elif tool == "chat_message":
         tool_args = {"user_id": args.user_id, "message": args.message}
 
     elif tool == "list_subtopics":
@@ -267,6 +269,20 @@ def main() -> None:
 
     elif tool == "book_calendar":
         tool_args = {"user_id": args.user_id, "text": args.text}
+
+    elif tool == "plan_study_week":
+        tool_args = {
+            "user_id": args.user_id,
+            "request": args.request,
+            "course_schedule": args.course_schedule,
+            "assignments": args.assignment,
+            "availability": args.availability,
+            "timezone": args.timezone,
+            "start_date": args.start_date,
+            "days": args.days,
+            "daily_study_limit_hours": args.daily_study_limit_hours,
+            "create_calendar_events": args.create_calendar_events,
+        }
 
     elif tool == "youtube_search":
         tool_args = {"query": args.query}

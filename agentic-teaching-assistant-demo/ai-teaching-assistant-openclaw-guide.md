@@ -12,6 +12,8 @@ through the NemoClaw chat UI.
 
 1. [Prerequisites](#1-prerequisites)
 2. [Environment Setup](#2-environment-setup)
+   - [Option A — Minimal (no RAG)](#option-a--minimal-no-rag-no-gpu-required)
+   - [Option B — With RAG Stack (recommended)](#option-b--with-rag-stack-recommended-for-large-pdfs)
 3. [One-Command Install (OpenClaw + MCP)](#3-one-command-install-openclaw--mcp)
 4. [Uploading a PDF from the OpenClaw UI](#4-uploading-a-pdf-from-the-openclaw-ui)
    - [Remote host via WSL + brev port-forward](#accessing-from-a-remote-host-via-wsl--brev)
@@ -29,7 +31,7 @@ through the NemoClaw chat UI.
 |---|---|
 | Docker | `docker --version` |
 | Docker Compose v2 | `docker compose version` — install: `sudo apt-get install -y docker-compose-v2` |
-| `NGC_API_KEY` | **Required.** Get one at https://build.nvidia.com — must have NGC registry access. `install.sh` uses it to log in to `nvcr.io` and pull the [NVIDIA-AI-Blueprints/rag](https://github.com/NVIDIA-AI-Blueprints/rag) Docker images (ingestor, RAG server, embedding/reranking NIMs, Milvus). The RAG stack is mandatory. |
+| `NVIDIA_API_KEY` | Get one at https://build.nvidia.com — used by Docker containers for embeddings & RAG |
 | `INFERENCE_API_KEY` | **Required** — used by the OpenShell gateway as the inference provider credential for OpenClaw chat |
 | NemoClaw / OpenShell | `openshell --version` — for the sandbox/skill integration |
 | Python 3.10+ | `python3 --version` (host only, not inside Docker) |
@@ -39,39 +41,106 @@ through the NemoClaw chat UI.
 
 ## 2. Environment Setup
 
-The RAG stack (Milvus + ingestor + RAG server) is **mandatory** and follows the
-NVIDIA-hosted Docker deployment path of the NVIDIA RAG Blueprint — see the
-upstream reference:
-[NVIDIA-AI-Blueprints/rag · deploy-docker-nvidia-hosted.md](https://github.com/NVIDIA-AI-Blueprints/rag/blob/main/docs/deploy-docker-nvidia-hosted.md).
-There is no no-RAG fallback. **No GPU required** — embeddings and reranking
-run on NVIDIA-hosted endpoints; only Milvus runs locally (the CPU image is
-patched in automatically when no GPU is present).
+### Step 1 — Set your API keys
 
 Create a `.env` file in the repo root:
 
 ```bash
 # .env  (repo root — loaded by Docker Compose and install.sh)
-NGC_API_KEY=nvapi-...                                 # required — used to pull the RAG blueprint Docker images from nvcr.io
-INFERENCE_API_KEY=nvapi-...                           # required — OpenShell gateway inference provider credential
+NVIDIA_API_KEY=nvapi-...                              # Docker containers: embeddings, RAG
+INFERENCE_API_KEY=nvapi-...                           # OpenShell gateway inference provider credential
 
 # Inference model — also configures openclaw inside the sandbox
 INFERENCE_BASE_URL=https://inference-api.nvidia.com/v1
 INFERENCE_MODEL=aws/anthropic/bedrock-claude-sonnet-4-6
 ```
 
-All four variables are required. `install.sh` will fail fast if any are missing.
+All four variables are required. `install.sh` will fail at Step 3 if any are missing.
 
-> **`NGC_API_KEY`** is required to pull every RAG-blueprint Docker image
-> (ingestor, RAG server, NV-Ingest, embedding/reranking NIMs, Milvus) from
-> `nvcr.io`. `install.sh` reads it from the root `.env`, propagates it into
-> `rag/deploy/compose/.env`, and runs `docker login nvcr.io` before bringing
-> the stack up. If the key has no NGC registry access, the login fails and
-> the blueprint images won't pull.
+For **Option B (RAG)**, also add the key to the RAG compose env file:
 
-That's the only manual step — Section 3's `install.sh` runs `make up` /
-`make fresh` for you, brings up every container (including the Study Break
-Games SPA served by the FastAPI backend at `/games/`), and verifies health
-before continuing.
+```bash
+# rag/deploy/compose/.env
+NVIDIA_API_KEY=nvapi-...
+INFERENCE_API_KEY=sk-...
+```
+
+### Step 2 — Start the stack
+
+> `make up` / `make up-with-rag` automatically run `make setup`, start all
+> containers, launch the Gradio UI, and start the FastAPI backend — no extra
+> steps needed.
+
+---
+
+### Option A — Minimal (no RAG, no GPU required)
+
+PDF text is extracted **directly** from uploaded files.
+
+```bash
+make up          # starts agenticta + Gradio UI + FastAPI backend (all-in-one)
+```
+
+For a clean start (wipes all user data first):
+
+```bash
+make fresh       # wipes mnt/*/pdfs, state.txt, JSON store, memory — then make up
+```
+
+**What works in Option A:**
+
+- PDF upload → curriculum generation (direct PDF extraction)
+- Study buddy chat (LLM only, no semantic search)
+- Quiz generation
+- Calendar booking
+- YouTube video search
+- Agentic memory
+- Study break games (`make games-up`)
+
+**Trade-off:** Uses raw extracted text rather than semantically retrieved
+chunks.  Quality is good; Option B gives better relevance for large PDFs.
+
+---
+
+### Option B — With RAG Stack (recommended for large PDFs)
+
+Adds Milvus vector DB + ingestor + RAG server using NVIDIA hosted
+embedding and reranking.  **No GPU required** — embeddings via `NVIDIA_API_KEY`.
+
+```bash
+make up-with-rag    # starts everything in one command
+```
+
+For a clean start (wipes user data and Milvus vector store):
+
+```bash
+make fresh-with-rag
+```
+
+**Additional services started:**
+
+| Service | URL | Purpose |
+|---|---|---|
+| Gradio UI | http://localhost:7860 | Main interface |
+| FastAPI + Swagger | http://localhost:8000/docs | REST API |
+| RAG Server | http://localhost:8081 | Semantic search |
+| Ingestor | http://localhost:8082 | PDF → Milvus |
+| Milvus | http://localhost:19530 | Vector DB |
+
+Check RAG health:
+
+```bash
+make rag-health
+```
+
+---
+
+### Study Break Games (optional, both modes)
+
+```bash
+make games-up     # http://localhost:8080
+make games-down
+```
 
 ---
 
@@ -81,23 +150,38 @@ After the Docker stack is running, run the install script to set up the
 MCP server and upload the skill to the sandbox:
 
 ```bash
-bash install.sh [--fresh] [sandbox-name]
+bash install.sh [--rag] [--fresh] [sandbox-name]
 ```
 
 ### Flags
 
 | Flag | Description |
 |---|---|
-| *(none)* | Start the full stack (agenticta + RAG stack — always on) |
+| *(none)* | Option A — no RAG stack |
+| `--rag` | Option B — start/verify the RAG stack (ingestor + RAG server + Milvus) |
 | `--fresh` | Wipe all user data before starting (PDFs, state, memory, Milvus collections) |
 | `sandbox-name` | Positional arg — target a specific sandbox. Auto-detected when only one exists. |
 
 ### Examples
 
 ```bash
-# Non-interactive: skip the user_id prompt at step 10
-TA_USER_ID=danny TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --fresh
+# Option A — minimal, no RAG
+bash install.sh
 
+# Option B — with RAG stack
+bash install.sh --rag
+
+# Fresh wipe + Option B
+bash install.sh --rag --fresh
+
+# Target a specific sandbox (positional, any position after the flags)
+bash install.sh --rag my-sandbox-name
+
+# Non-interactive: skip the user_id prompt at step 10
+  TA_USER_ID=lulu TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --rag    --fresh                                                                                                             
+
+# Override the upload portal URL (when host is not directly reachable)
+TA_EXTERNAL_URL=http://my.public.hostname:8000 bash install.sh --rag
 ```
 
 ### Environment variable overrides
@@ -105,7 +189,7 @@ TA_USER_ID=danny TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --fresh
 | Variable | Default | Description |
 |---|---|---|
 | `TA_USER_ID` | *(prompts)* | Default `user_id` written into `config.json`; set to skip the interactive prompt at step 10 |
-
+| `TA_EXTERNAL_URL` | `http://<detected-host-ip>:8000` | Upload portal URL embedded in the skill config; override when the auto-detected IP is not reachable by users |
 
 **What `install.sh` does (idempotent — safe to re-run):**
 
@@ -113,9 +197,9 @@ TA_USER_ID=danny TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --fresh
 |---|---|---|
 | 0 | Kill stale MCP process | — |
 | 1 | Check prerequisites | fails fast if missing |
-| 2 | `make up` (full stack including RAG) | skipped if container already running |
+| 2 | `make up` / `make up-with-rag` | skipped if container already running |
 | 2b | Wait for TA API health (port 8000) | polls 30× / 2 s |
-| 2c | Wait for RAG services (ingestor + RAG server) | always — polls 30× / 2 s |
+| 2c | Wait for RAG services | only with `--rag` |
 | 3 | Load `.env` / `credentials.json` | — |
 | 4 | `nemoclaw onboard` | skipped if sandbox exists |
 | 5 | `openshell provider + inference set` | provider update/create is idempotent |
@@ -144,7 +228,7 @@ User (browser)  ──POST /upload/submit──▶  TA API (port 8000)
                                          saves PDF to host
                                          calls /api/files/upload
                                                │
-                                         ingests into Milvus
+                                         ingests into Milvus (Option B)
                                                │
                                          returns success page
 ```
@@ -213,7 +297,7 @@ tunnels and the link won't open.
 
 ```bash
 # Run on the remote host (in your SSH session to the brev instance):
-TA_USER_ID=danny TA_EXTERNAL_URL=http://127.0.0.1:8000 bash install.sh --fresh
+TA_USER_ID=danny TA_EXTERNAL_URL=http://127.0.0.1:8000 bash install.sh --rag
 ```
 
 **Step 3 — Open in your local browser**
@@ -250,7 +334,7 @@ nohup openclaw gateway run > /tmp/gateway.log 2>&1 &
 **Option — Host is directly reachable (public IP / same LAN):**
 
 ```bash
-TA_EXTERNAL_URL=http://<actual-host-ip>:8000 bash install.sh
+TA_EXTERNAL_URL=http://<actual-host-ip>:8000 bash install.sh --rag
 ```
 
 ---
@@ -275,7 +359,7 @@ Agent: [calls list_subtopics]
        ...
 
 You: "Explain subtopic 0"
-Agent: [calls study_material_query] Here's what you need to know about Claude Skills...
+Agent: [calls chat_message] Here's what you need to know about Claude Skills...
 
 You: "Quiz me on subtopic 0"
 Agent: [calls generate_quiz]
@@ -292,6 +376,12 @@ Agent: [calls submit_quiz(answers="B,A,B")]
 You: "Book a study session for tomorrow at 3pm"
 Agent: [calls book_calendar] Here's your .ics event — save it to your calendar.
 
+You: "Plan my week around my Friday quiz"
+Agent: [calls plan_study_week] Here's a weekly study plan with prioritized blocks.
+
+You: "Make that study plan downloadable for my calendar"
+Agent: [calls plan_study_week --create-calendar-events] Download this .ics file and add it to your calendar.
+
 You: "Find YouTube videos about Claude skills"
 Agent: [calls youtube_search] Here are 5 relevant videos...
 ```
@@ -300,7 +390,7 @@ Agent: [calls youtube_search] Here are 5 relevant videos...
 
 ## 6. REST API Reference (curl)
 
-The FastAPI backend starts automatically with `make up`.
+The FastAPI backend starts automatically with `make up` / `make up-with-rag`.
 Swagger UI is at **http://localhost:8000/docs**.
 
 ### Recommended workflow
@@ -309,7 +399,7 @@ Swagger UI is at **http://localhost:8000/docs**.
 Upload PDF  →  Check ingestion  →  Generate curriculum  →  Chat / Quiz / Calendar
 ```
 
-Upload automatically ingests the PDF into Milvus in the same call.
+Upload automatically ingests the PDF into Milvus in the same call (Option B).
 When the response says `"ingested into vector store"`, chunks are already
 indexed and you can go straight to curriculum generation.
 
@@ -317,11 +407,12 @@ indexed and you can go straight to curriculum generation.
 # Health check
 curl http://localhost:8000/
 
-# 1. Upload a PDF
+# 1. Upload a PDF (Option A & B)
 curl -X POST http://localhost:8000/api/files/upload \
   -F "user_id=testuser" \
   -F "files=@/path/to/your.pdf"
 # → {"success":true,"message":"Successfully uploaded 1 file(s) and ingested into vector store",...}
+# → {"success":true,"message":"Successfully uploaded 1 file(s)",...}  (Option A)
 
 # 2. Verify ingestion status (optional)
 curl http://localhost:8000/api/files/ingest-status/testuser
@@ -388,11 +479,13 @@ curl -X DELETE http://localhost:8000/api/files/collections
 ## 7. Daily Operations
 
 ```bash
-# Start the full stack (agenticta + RAG)
-make up
+# Start
+make up                  # Option A — no RAG
+make up-with-rag         # Option B — with RAG
 
-# Clean start (wipes all user state: PDFs, state.txt, JSON store, memory, Milvus)
-make fresh
+# Clean start (wipes all user state: PDFs, state.txt, JSON store, memory)
+make fresh               # Option A
+make fresh-with-rag      # Option B — also clears Milvus
 
 # Stop everything
 make down
@@ -416,7 +509,7 @@ make rebuild
 # MCP server
 tail -f /tmp/ta-mcp.log                         # watch MCP logs
 kill $(cat /tmp/ta-mcp.pid)                     # stop MCP server
-bash install.sh                           # restart everything
+bash install.sh --rag                           # restart everything
 ```
 
 ### MCP tool reference (OpenClaw skill)
@@ -431,12 +524,11 @@ bash install.sh                           # restart everything
 | `check_ingest_status` | Verify PDF is ready for curriculum generation |
 | `generate_curriculum` | After upload confirmed — builds study plan |
 | `get_curriculum` | Retrieve existing curriculum |
-| `study_material_query` | Question grounded in the user's uploaded PDFs (RAG-backed) |
-| `chitchat` | Friendly small-talk in the study-buddy persona |
-| `supplement_query` | General/supplemental knowledge unrelated to the PDFs |
+| `chat_message` | General study questions |
 | `list_subtopics` | Show chapter subtopics with indices |
 | `generate_quiz` | Create MCQ quiz for a subtopic |
 | `submit_quiz` | Grade answers (A/B/C/D or 0/1/2/3) |
+| `plan_study_week` | Create a weekly academic plan from curriculum, schedule, assignments, deadlines, and availability. Use `--create-calendar-events` for a downloadable `.ics` |
 | `book_calendar` | Natural-language → .ics calendar event |
 | `youtube_search` | Find supplementary videos |
 | `delete_user_data` | Wipe one user (before re-upload) |
@@ -458,7 +550,7 @@ TA API (port 8000)  ◀───────── OpenClaw sandbox
      │
      ├─ /api/files/upload  → saves PDF to mnt/{user_id}/pdfs/
      │       │
-     │       └─ Ingestor (port 8082)
+     │       └─ (Option B) Ingestor (port 8082)
      │                          │
      │                       Milvus (port 19530)
      │
@@ -466,12 +558,13 @@ TA API (port 8000)  ◀───────── OpenClaw sandbox
      │       │
      │       └─ nodes.py / build_chapters()
      │               │
-     │               ├─ chapter_gen_from_pdfs()  ← PDF text → chapter titles via LLM
+     │               ├─ chapter_gen_from_pdfs()  ← direct PDF + LLM
      │               └─ sub_topic_builder()
      │                       │
-     │                       └─ RAG server (port 8081)  ← semantic chunks
+     │                       ├─ RAG server (port 8081)  ← Option B
+     │                       └─ Direct PDF fallback     ← Option A
      │                               ▼
-     │                          LLM (NVIDIA Inference Hub)
+     │                          LLM (NVIDIA API)
      │
      ├─ /api/chat/message      → study buddy (router → tool handler)
      ├─ /api/quiz/*            → quiz generation + grading
@@ -510,12 +603,13 @@ sudo apt-get install -y docker-compose-v2
 # verify
 docker compose version
 # then retry
-TA_USER_ID=demo TA_EXTERNAL_URL=http://localhost:8000 bash install.sh
+TA_USER_ID=demo TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --rag
 ```
 
-> This affects `make up` — it uses `docker compose up -d` internally.
+> This affects both `make up` (Option A) and `make up-with-rag` (Option B) — both
+> Makefile targets use `docker compose up -d` internally.
 
-**`install.sh` fails with `couldn't find env file`, `NGC_API_KEY is required`, or `invalid mount path: ':'`**
+**`install.sh --rag` fails with `couldn't find env file`, `NGC_API_KEY is required`, or `invalid mount path: ':'`**
 
 Three things must exist for the RAG compose stack that are not bundled with this
 repo: the NVIDIA RAG Blueprint source, a correctly populated
@@ -577,7 +671,7 @@ To create the `.env` from scratch manually:
 git clone https://github.com/NVIDIA-AI-Blueprints/rag.git rag
 
 # 2. Build .env — note the 'printf' guard before PROMPT_CONFIG_FILE
-NGC_KEY=$(grep '^NGC_API_KEY=' .env | cut -d= -f2 | awk '{print $1}')
+NGC_KEY=$(grep '^NVIDIA_API_KEY=' .env | cut -d= -f2 | awk '{print $1}')
 {
   echo "export NGC_API_KEY=${NGC_KEY}"
   cat rag/deploy/compose/nvdev.env
@@ -588,7 +682,7 @@ NGC_KEY=$(grep '^NGC_API_KEY=' .env | cut -d= -f2 | awk '{print $1}')
 echo "${NGC_KEY}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 
 # 4. Retry
-TA_USER_ID=demo TA_EXTERNAL_URL=http://localhost:8000 bash install.sh
+TA_USER_ID=demo TA_EXTERNAL_URL=http://localhost:8000 bash install.sh --rag
 ```
 
 **`make rag-up` / `milvus-standalone` fails with `could not select device driver "nvidia"`**
@@ -672,9 +766,9 @@ make rag-up
 > The key must have access to the NGC private registry.  `nvapi-...` keys from
 > the NVIDIA API Catalog work here.
 
-**`install.sh` skips RAG services when `agenticta` is already running**
+**`install.sh --rag` skips RAG services when `agenticta` is already running**
 
-The container-running check in Step 2 previously skipped the RAG bring-up
+The container-running check in Step 2 previously skipped `make up-with-rag`
 entirely when `agenticta` was already up — leaving the ingestor and RAG server
 never started.  **`install.sh` now handles this automatically**: when `agenticta`
 is running but the ingestor (port 8082) is not, it runs `make rag-up` to bring
@@ -725,7 +819,7 @@ make logs-gradio
 **TA API not starting**
 ```bash
 make logs-api
-# Common cause: INFERENCE_API_KEY not set in .env
+# Common cause: NVIDIA_API_KEY not set in .env
 ```
 
 **Upload portal not reachable from browser**
@@ -738,11 +832,11 @@ ssh -L 8000:<host-ip>:8000 user@<host>
 **Curriculum generation fails / empty study materials**
 ```bash
 make logs-gradio   # look for [study_material_gen] lines
-# Empty/short context usually means the PDF is image-only (scanned) — try a text-based PDF
-# Verify the ingestor populated Milvus: make rag-health
+# "Direct PDF extraction: N chars" — OK for Option A
+# "0 chars" — PDF may be image-only (scanned); try a text-based PDF
 ```
 
-**RAG services not responding**
+**RAG services not responding (Option B)**
 ```bash
 make rag-health
 make rag-down && make rag-up
@@ -753,8 +847,8 @@ docker compose -f rag/deploy/compose/vectordb.yaml --env-file rag/deploy/compose
 
 The RAG services run on the `nvidia-rag` Docker network.  `agenticta` must be
 connected to that network so it can resolve `ingestor-server:8082` and
-`rag-server:8081`.  `make up` and `make rag-up` now do this automatically.
-To fix manually:
+`rag-server:8081`.  `make up-with-rag` and `make rag-up` now do this
+automatically.  To fix manually:
 
 ```bash
 docker network connect nvidia-rag agenticta
@@ -766,7 +860,8 @@ The OpenShell gateway inference provider is not configured. This is normally han
 by `install.sh` step 5, but can also be done manually:
 
 ```bash
-# 1. Ensure the inference key is exported
+# 1. Ensure keys are exported
+export NVIDIA_API_KEY=nvapi-...
 export INFERENCE_API_KEY=nvapi-...
 
 # 2. Start the gateway (if not already running)
@@ -797,7 +892,7 @@ Stop the stack first:
 
 ```bash
 make down
-bash install.sh --fresh
+bash install.sh --rag --fresh
 ```
 
 > Note: `make down` does **not** stop the OpenShell gateway (`openshell-cluster-openshell`).
@@ -809,20 +904,20 @@ The script prompts interactively for a `user_id` unless `TA_USER_ID` is set.
 Pass it as an env var to run fully non-interactively:
 
 ```bash
-TA_USER_ID=alice bash install.sh
+TA_USER_ID=alice bash install.sh --rag
 ```
 
 **MCP server not responding**
 ```bash
 cat /tmp/ta-mcp.log
 # Restart:
-kill $(cat /tmp/ta-mcp.pid) && bash install.sh
+kill $(cat /tmp/ta-mcp.pid) && bash install.sh --rag
 ```
 
 **Skill not found in sandbox after reconnect**
 ```bash
 # Re-run install to re-upload
-bash install.sh
+bash install.sh --rag
 # Then disconnect and reconnect in NemoClaw
 ```
 
