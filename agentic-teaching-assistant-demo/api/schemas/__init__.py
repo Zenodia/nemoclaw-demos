@@ -9,6 +9,7 @@ from .curriculum import *
 from .chat import *
 from .quiz import *
 from .calendar import *
+from .planner import *
 
 __all__ = [
     # User schemas
@@ -38,5 +39,9 @@ __all__ = [
     # Calendar schemas
     "CalendarCreateRequest",
     "CalendarEventResponse",
+    # Planner schemas
+    "PlannerRequest",
+    "PlannerBlockResponse",
+    "PlannerResponse",
 ]
 

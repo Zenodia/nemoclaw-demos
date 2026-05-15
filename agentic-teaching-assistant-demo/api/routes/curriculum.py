@@ -340,8 +340,12 @@ async def generate_curriculum_stream(
                 existing_map = {}
                 if isinstance(collections_response, dict):
                     for c in collections_response.get("collections", []):
-                        cname = c.get("collection_name", c) if isinstance(c, dict) else c
-                        existing_map[cname] = c
+                        if isinstance(c, dict):
+                            cname = c.get("collection_name") or c.get("name")
+                        else:
+                            cname = c
+                        if cname:
+                            existing_map[cname] = c
 
                 already_ingested = (
                     collection_name in existing_map
