@@ -231,6 +231,71 @@ def _search_with_ytdlp(query, search_limit=5):
         return None
 
 
+def search_youtube_videos(query, search_limit=15):
+    """
+    Search YouTube and return multiple video dictionaries.
+
+    This is the API route entrypoint used by api/routes/youtube.py. Keep it in
+    this module so the FastAPI route does not fall back to mock data.
+    """
+    try:
+        cmd = [
+            "yt-dlp",
+            f"ytsearch{search_limit}:{query}",
+            "--dump-json",
+            "--no-playlist",
+            "--skip-download",
+            "--no-warnings",
+            "--quiet",
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"yt-dlp search failed: {result.stderr}")
+            return []
+
+        videos = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                video_data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            video_id = video_data.get("id", "")
+            webpage_url = video_data.get("webpage_url") or (
+                f"https://www.youtube.com/watch?v={video_id}" if video_id else video_data.get("url", "")
+            )
+            view_count = video_data.get("view_count", 0) or 0
+            video_info = {
+                "title": video_data.get("title", "N/A"),
+                "url": webpage_url,
+                "video_id": video_id,
+                "duration": video_data.get("duration_string") or str(video_data.get("duration", "N/A")),
+                "views_text": f"{view_count:,} views",
+                "views_count": view_count,
+                "published": video_data.get("upload_date", "N/A"),
+                "channel": video_data.get("channel") or video_data.get("uploader", "N/A"),
+                "thumbnail_url": video_data.get("thumbnail", ""),
+                "thumbnail": video_data.get("thumbnail", ""),
+                "description": (video_data.get("description") or "")[:500],
+            }
+            video_info["relevance_score"] = calculate_relevance_score(video_info, query)
+            videos.append(video_info)
+
+        return sorted(videos, key=lambda x: x["relevance_score"], reverse=True)
+    except subprocess.TimeoutExpired:
+        print("yt-dlp search timed out")
+        return []
+    except FileNotFoundError:
+        print("yt-dlp not found. Please install it: pip install yt-dlp")
+        return []
+    except Exception as e:
+        print(f"yt-dlp search error: {e}")
+        return []
+
+
 def fetch_most_relevant_youtube_video(query, search_limit=15):
     """
     Search YouTube and return the most RELEVANT video based on query.

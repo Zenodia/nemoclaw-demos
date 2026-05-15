@@ -3,15 +3,16 @@
 # AI Teaching Assistant — Full Install Script
 #
 # Sets up the complete stack:
-#   1. TA environment  (Docker via make up — always includes the RAG stack)
+#   1. TA environment  (Docker via make up / make up-with-rag)
 #   2. MCP server      (host Python process on port 8999)
 #   3. OpenShell skill (sandbox upload + venv + config.json)
 #
 # Idempotent — each step checks whether it is already done before acting.
 # Usage:
-#   bash install.sh [--fresh] [sandbox-name]
+#   bash install.sh [--rag] [--fresh] [sandbox-name]
 #
-#   --fresh    Wipe all user data before starting (make fresh).
+#   --rag      Use Option B (with RAG stack).  Default: Option A (no RAG).
+#   --fresh    Wipe all user data before starting (make fresh / fresh-with-rag).
 #   sandbox-name  Target sandbox (auto-detected when only one exists).
 # =============================================================================
 set -euo pipefail
@@ -23,16 +24,19 @@ MCP_PID_FILE="/tmp/ta-mcp.pid"
 MCP_LOG_FILE="/tmp/ta-mcp.log"
 SKILL_NAME="ai-teaching-assistant-skills"
 SKILL_SRC="$SCRIPT_DIR/ai_teaching_assistant_skills"
-SANDBOX_SKILL_ROOT="/sandbox/.openclaw/workspace/skills/$SKILL_NAME"
+SANDBOX_WORKSPACE_ROOT="/sandbox/.openclaw-data/workspace"
+SANDBOX_SKILL_ROOT="$SANDBOX_WORKSPACE_ROOT/skills/$SKILL_NAME"
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
+USE_RAG=false
 USE_FRESH=false
 SANDBOX_ARG=""
 
 for arg in "$@"; do
   case "$arg" in
+    --rag)   USE_RAG=true ;;
     --fresh) USE_FRESH=true ;;
-    -*)      echo "Unknown flag: $arg  (valid: --fresh)" >&2; exit 1 ;;
+    -*)      echo "Unknown flag: $arg  (valid: --rag  --fresh)" >&2; exit 1 ;;
     *)       SANDBOX_ARG="$arg" ;;
   esac
 done
@@ -52,7 +56,8 @@ echo -e "${CYAN}  ║  AI Teaching Assistant — Full Stack Installer           
 echo -e "${CYAN}  ║  AgenticTA  +  MCP Server  +  OpenShell Skill           ║${NC}"
 echo -e "${CYAN}  ╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Mode  : ${GREEN}Full stack — agenticta + RAG (mandatory)${NC}"
+$USE_RAG  && echo -e "  Mode  : ${GREEN}Option B — with RAG stack${NC}" \
+          || echo -e "  Mode  : ${YELLOW}Option A — no RAG (direct PDF)${NC}"
 $USE_FRESH && echo -e "  Fresh : ${YELLOW}yes — user data will be wiped${NC}"
 echo ""
 
@@ -84,34 +89,6 @@ step "Step 1 — Prerequisites"
 
 command -v docker    >/dev/null 2>&1 || fail "docker not found. Install Docker first."
 docker info          >/dev/null 2>&1 || fail "Docker daemon is not running. Start Docker and retry."
-# Compose v2 must be present as a docker CLI plugin — `make up` later runs
-# `docker compose up -d`.  Without the plugin docker parses the args as
-# `docker -d ...` and aborts with a cryptic "unknown shorthand flag" error.
-# If missing, drop the official release binary into ~/.docker/cli-plugins/
-# (per-user install — no sudo, no apt repo, works on any Linux).
-if ! docker compose version >/dev/null 2>&1; then
-  warn "docker compose v2 plugin not found — installing per-user binary..."
-  command -v curl >/dev/null 2>&1 \
-    || fail "curl not found — required to download docker-compose-plugin."
-  _arch=$(uname -m)
-  case "$_arch" in
-    x86_64|amd64)         _compose_arch="x86_64" ;;
-    aarch64|arm64)        _compose_arch="aarch64" ;;
-    armv7l|armv7)         _compose_arch="armv7" ;;
-    *)                    fail "Unsupported CPU arch for docker compose binary: $_arch" ;;
-  esac
-  _plugin_dir="$HOME/.docker/cli-plugins"
-  _plugin_path="$_plugin_dir/docker-compose"
-  _compose_url="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${_compose_arch}"
-  mkdir -p "$_plugin_dir"
-  info "Downloading $(basename "$_compose_url") → $_plugin_path"
-  curl -fsSL "$_compose_url" -o "$_plugin_path" \
-    || fail "Failed to download docker-compose binary from $_compose_url"
-  chmod +x "$_plugin_path"
-  docker compose version >/dev/null 2>&1 \
-    || fail "docker compose still not callable after install. Check $_plugin_path is executable."
-  ok "docker-compose-plugin installed at $_plugin_path"
-fi
 command -v make      >/dev/null 2>&1 || fail "make not found."
 command -v python3   >/dev/null 2>&1 || fail "python3 not found."
 command -v openshell >/dev/null 2>&1 || fail "openshell CLI not found. Is NemoClaw installed?"
@@ -126,7 +103,6 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 ok "Docker       : $(docker --version | head -1)"
-ok "Compose v2   : $(docker compose version --short 2>/dev/null || echo 'found')"
 ok "Python       : $(python3 --version)"
 ok "uv           : $(uv --version)"
 ok "openshell    : $(openshell --version 2>/dev/null | head -1 || echo 'found')"
@@ -147,29 +123,30 @@ _container_running() {
     | grep -q "agenticta"
 }
 
-# ── 2a. Ensure RAG blueprint and cloud .env are ready (always) ───────────────
-RAG_COMPOSE_DIR="$SCRIPT_DIR/rag/deploy/compose"
+# ── 2a. Ensure RAG blueprint and cloud .env are ready (Option B only) ────────
+if $USE_RAG; then
+  RAG_COMPOSE_DIR="$SCRIPT_DIR/rag/deploy/compose"
 
-# Clone NVIDIA-AI-Blueprints/rag if compose files are missing
-if [ ! -f "$RAG_COMPOSE_DIR/vectordb.yaml" ]; then
-  info "RAG blueprint not found — cloning NVIDIA-AI-Blueprints/rag..."
-  command -v git >/dev/null 2>&1 || fail "git not found. Install git and retry."
-  # Remove stale incomplete rag/ dir (no .git inside) before fresh clone
-  if [ -d "$SCRIPT_DIR/rag" ] && [ ! -d "$SCRIPT_DIR/rag/.git" ]; then
-    rm -rf "$SCRIPT_DIR/rag"
+  # Clone NVIDIA-AI-Blueprints/rag if compose files are missing
+  if [ ! -f "$RAG_COMPOSE_DIR/vectordb.yaml" ]; then
+    info "RAG blueprint not found — cloning NVIDIA-AI-Blueprints/rag..."
+    command -v git >/dev/null 2>&1 || fail "git not found. Install git and retry."
+    # Remove stale incomplete rag/ dir (no .git inside) before fresh clone
+    if [ -d "$SCRIPT_DIR/rag" ] && [ ! -d "$SCRIPT_DIR/rag/.git" ]; then
+      rm -rf "$SCRIPT_DIR/rag"
+    fi
+    git clone https://github.com/NVIDIA-AI-Blueprints/rag.git "$SCRIPT_DIR/rag" \
+      || fail "Failed to clone NVIDIA-AI-Blueprints/rag. Check network connectivity."
+    ok "RAG blueprint cloned → rag/"
+  else
+    ok "RAG blueprint present"
   fi
-  git clone https://github.com/NVIDIA-AI-Blueprints/rag.git "$SCRIPT_DIR/rag" \
-    || fail "Failed to clone NVIDIA-AI-Blueprints/rag. Check network connectivity."
-  ok "RAG blueprint cloned → rag/"
-else
-  ok "RAG blueprint present"
-fi
 
-# Always read the NGC key from the root .env (authoritative source)
-_ngc_key=$(grep "^NGC_API_KEY=" "$SCRIPT_DIR/.env" | cut -d= -f2 | awk '{print $1}')
-[ -n "$_ngc_key" ] || fail "NGC_API_KEY not set in root .env — required to pull the NVIDIA-AI-Blueprints/rag Docker images from nvcr.io"
-_prompt_yaml="$SCRIPT_DIR/rag/src/nvidia_rag/rag_server/prompt.yaml"
-[ -f "$_prompt_yaml" ] || fail "Expected prompt.yaml not found at $_prompt_yaml"
+  # Always read the NGC key from the root .env (authoritative source)
+  _ngc_key=$(grep "^NVIDIA_API_KEY=" "$SCRIPT_DIR/.env" | cut -d= -f2 | awk '{print $1}')
+  [ -n "$_ngc_key" ] || fail "NVIDIA_API_KEY not set in root .env — required for NGC_API_KEY"
+  _prompt_yaml="$SCRIPT_DIR/rag/src/nvidia_rag/rag_server/prompt.yaml"
+  [ -f "$_prompt_yaml" ] || fail "Expected prompt.yaml not found at $_prompt_yaml"
 
   # Build rag/deploy/compose/.env from nvdev.env if it is missing OR if it
   # does not contain a resolved NGC_API_KEY value (e.g. it still has the
@@ -249,60 +226,42 @@ PYEOF
     grep -q "APP_VECTORSTORE_ENABLEGPUINDEX" "$_rag_env" 2>/dev/null \
       || echo "export APP_VECTORSTORE_ENABLEGPUINDEX=False" >> "$_rag_env"
     ok "RAG .env: CPU Milvus settings appended"
-
-    # Stage cpu-override.yaml into the RAG compose dir — `make up` includes it
-    # via `-f rag/deploy/compose/cpu-override.yaml` on CPU hosts, so it must
-    # exist at that path or docker compose aborts before starting any service.
-    _cpu_override_src="$SCRIPT_DIR/cpu-override.yaml"
-    _cpu_override_dst="$RAG_COMPOSE_DIR/cpu-override.yaml"
-    if [ ! -f "$_cpu_override_src" ]; then
-      fail "cpu-override.yaml not found at $_cpu_override_src — required for CPU-only hosts"
-    fi
-    if [ ! -f "$_cpu_override_dst" ] || ! cmp -s "$_cpu_override_src" "$_cpu_override_dst"; then
-      cp "$_cpu_override_src" "$_cpu_override_dst"
-      ok "cpu-override.yaml staged → $_cpu_override_dst"
-    else
-      ok "cpu-override.yaml already staged"
-    fi
   fi
 
-# Log in to nvcr.io using the key from root .env (always fresh, avoids
-# stale/unresolved values in the RAG .env)
-if echo "$_ngc_key" | docker login nvcr.io -u '$oauthtoken' --password-stdin >/dev/null 2>&1; then
-  ok "Logged in to nvcr.io"
-else
-  fail "docker login nvcr.io failed — verify NGC_API_KEY in root .env has NGC registry access"
+  # Log in to nvcr.io using the key from root .env (always fresh, avoids
+  # stale/unresolved values in the RAG .env)
+  if echo "$_ngc_key" | docker login nvcr.io -u '$oauthtoken' --password-stdin >/dev/null 2>&1; then
+    ok "Logged in to nvcr.io"
+  else
+    fail "docker login nvcr.io failed — verify NVIDIA_API_KEY in root .env has NGC registry access"
+  fi
 fi
 
 # ── 2b. Check / start the Docker stack ───────────────────────────────────────
 # Skip make up only when the container is running AND --fresh was NOT requested.
-# With --fresh we always go through make fresh to wipe + restart cleanly.
+# With --fresh we always go through make fresh-* to wipe + restart cleanly.
 if _container_running && ! $USE_FRESH; then
   ok "agenticta container already running — skipping make up"
-  # The in-container FastAPI/Gradio processes are launched by `make up`, not by
-  # the container start — if they died (or never started), the API health wait
-  # below will time out.  Re-launch them when the API is not responding.
-  if ! _ta_api_up; then
-    info "TA API not responding inside the running container — starting FastAPI + Gradio"
-    make api    || fail "make api failed.    Check: make logs-api"
-    make gradio || fail "make gradio failed. Check: make logs-gradio"
-  else
-    ok "TA API already responding"
-  fi
   # RAG services may not be running even when agenticta is — start them if needed
-  if ! curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1; then
-    info "RAG services not running — starting with make rag-up"
-    make rag-up || fail "make rag-up failed. Check: make rag-health"
-  else
-    ok "RAG services already running"
+  if $USE_RAG; then
+    if ! curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1; then
+      info "RAG services not running — starting with make rag-up"
+      make rag-up || fail "make rag-up failed. Check: make rag-health"
+    else
+      ok "RAG services already running"
+    fi
   fi
 else
   if $USE_FRESH; then
-    info "Running: make fresh"
-    make fresh
+    $USE_RAG && info "Running: make fresh-with-rag" \
+             || info "Running: make fresh"
+    $USE_RAG && make fresh-with-rag \
+             || make fresh
   else
-    info "Running: make up"
-    make up
+    $USE_RAG && info "Running: make up-with-rag" \
+             || info "Running: make up"
+    $USE_RAG && make up-with-rag \
+             || make up
   fi
 fi
 
@@ -318,27 +277,29 @@ done
 $TA_UP || fail "TA API did not come up after 60 s. Check: make logs-api"
 ok "TA API is healthy (http://localhost:8000)"
 
-# ── 2c. Wait for RAG services ────────────────────────────────────────────────
-info "Waiting for ingestor (localhost:8082)..."
-INGESTOR_UP=false
-for i in $(seq 1 30); do
-  curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1 \
-    && INGESTOR_UP=true && break
-  sleep 2
-done
-$INGESTOR_UP || fail "Ingestor did not come up. Check: make logs"
+# ── 2c. If RAG mode: wait for RAG services ───────────────────────────────────
+if $USE_RAG; then
+  info "Waiting for ingestor (localhost:8082)..."
+  INGESTOR_UP=false
+  for i in $(seq 1 30); do
+    curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1 \
+      && INGESTOR_UP=true && break
+    sleep 2
+  done
+  $INGESTOR_UP || fail "Ingestor did not come up. Check: make logs"
 
-info "Waiting for RAG server (localhost:8081)..."
-RAG_UP=false
-for i in $(seq 1 30); do
-  curl -sf --max-time 3 "http://localhost:8081/v1/health" >/dev/null 2>&1 \
-    && RAG_UP=true && break
-  sleep 2
-done
-$RAG_UP || fail "RAG server did not come up. Check: make logs"
+  info "Waiting for RAG server (localhost:8081)..."
+  RAG_UP=false
+  for i in $(seq 1 30); do
+    curl -sf --max-time 3 "http://localhost:8081/v1/health" >/dev/null 2>&1 \
+      && RAG_UP=true && break
+    sleep 2
+  done
+  $RAG_UP || fail "RAG server did not come up. Check: make logs"
 
-ok "Ingestor    : http://localhost:8082"
-ok "RAG server  : http://localhost:8081"
+  ok "Ingestor    : http://localhost:8082"
+  ok "RAG server  : http://localhost:8081"
+fi
 
 # =============================================================================
 # STEP 2b — Build Study Break Games SPA
@@ -439,25 +400,8 @@ _live_sandboxes() {
 LIVE_COUNT=$(_live_sandboxes | wc -l | tr -d ' ')
 
 if [ "${LIVE_COUNT:-0}" -eq 0 ]; then
-  info "No sandbox found — running 'nemoclaw onboard' (non-interactive)..."
-  # Drive nemoclaw onboard end-to-end without prompts.  The "NVIDIA Endpoints"
-  # menu option points at integrate.api.nvidia.com (the API Catalog) and would
-  # try to auth our INFERENCE_API_KEY against the wrong endpoint, so we pick
-  # the "custom" (Other OpenAI-compatible) provider and feed it the Inference
-  # Hub base URL + key directly.  Step 5 below replaces this provisional
-  # provider with the canonical INFERENCE_PROVIDER_NAME anyway.
-  export NEMOCLAW_NON_INTERACTIVE=1
-  export NEMOCLAW_PROVIDER=custom
-  export NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}"
-  export NEMOCLAW_MODEL="${INFERENCE_MODEL}"
-  export COMPATIBLE_API_KEY="${INFERENCE_API_KEY}"
-  # Some legacy code paths still look for NVIDIA_API_KEY by name; stage the
-  # same key there too so any incidental check finds a value.
-  export NVIDIA_API_KEY="${INFERENCE_API_KEY}"
-  # Non-interactive onboarding refuses to run without explicit acceptance of
-  # the upstream third-party-software notice; the flag is required by design.
-  export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
-  nemoclaw onboard --non-interactive --yes-i-accept-third-party-software
+  info "No sandbox found — running 'nemoclaw onboard'..."
+  nemoclaw onboard
   ok "Onboarding complete"
 
   info "Waiting for sandbox to become ready..."
@@ -701,12 +645,16 @@ ok "Upload confirmed"
 # The agent reads this at session start — it injects TA skill routing rules
 # so the agent always calls the right CLI tool instead of hallucinating.
 HEARTBEAT_SRC="$SCRIPT_DIR/ai_teaching_assistant_skills/HEARTBEAT.md"
-HEARTBEAT_DEST="/sandbox/.openclaw-data/workspace/HEARTBEAT.md"
+HEARTBEAT_DEST="$SANDBOX_WORKSPACE_ROOT/HEARTBEAT.md"
 
 if [ -f "$HEARTBEAT_SRC" ]; then
+  openshell sandbox exec -n "$SANDBOX_NAME" -- \
+    sh -c "if [ -d ${HEARTBEAT_DEST} ]; then rm -rf ${HEARTBEAT_DEST}; fi" \
+    || warn "Could not clean old HEARTBEAT.md directory"
+
   openshell sandbox upload "$SANDBOX_NAME" \
     "$HEARTBEAT_SRC" \
-    "$HEARTBEAT_DEST" \
+    "$SANDBOX_WORKSPACE_ROOT" \
     && ok "HEARTBEAT.md uploaded to sandbox workspace" \
     || warn "HEARTBEAT.md upload failed — agent may not invoke skill tools correctly"
 fi
@@ -772,7 +720,7 @@ ok "fastmcp import verified in skill venv"
 step "Step 11b — Upload sandbox markdown files"
 
 SANDBOX_MD_SRC="$SCRIPT_DIR/sandbox_markdown_files"
-SANDBOX_MD_DEST="/sandbox/.openclaw/workspace"
+SANDBOX_MD_DEST="$SANDBOX_WORKSPACE_ROOT"
 
 if [ ! -d "$SANDBOX_MD_SRC" ]; then
   warn "sandbox_markdown_files/ not found at $SANDBOX_MD_SRC — skipping"
@@ -782,9 +730,12 @@ else
   for _md_file in "$SANDBOX_MD_SRC"/*.md; do
     [ -f "$_md_file" ] || continue
     _md_name=$(basename "$_md_file")
+    openshell sandbox exec -n "$SANDBOX_NAME" -- \
+      sh -c "if [ -d ${SANDBOX_MD_DEST}/${_md_name} ]; then rm -rf ${SANDBOX_MD_DEST}/${_md_name}; fi" \
+      || warn "Could not clean old $_md_name directory"
     openshell sandbox upload "$SANDBOX_NAME" \
       "$_md_file" \
-      "${SANDBOX_MD_DEST}/${_md_name}" \
+      "$SANDBOX_MD_DEST" \
       && { ok "$_md_name → $SANDBOX_MD_DEST/"; _md_ok=$((_md_ok + 1)); } \
       || { warn "$_md_name upload failed"; _md_fail=$((_md_fail + 1)); }
   done
@@ -828,8 +779,8 @@ _check "config.json  : $SANDBOX_SKILL_ROOT"  "$CFG_V"
 
 # Sandbox markdown files
 MD_V=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
-  sh -c "test -f /sandbox/.openclaw/workspace/HEARTBEAT.md && echo ok" 2>/dev/null || true)
-_check "Sandbox MDs  : /sandbox/.openclaw/workspace/"  "$MD_V"
+  sh -c "test -f ${SANDBOX_WORKSPACE_ROOT}/HEARTBEAT.md && echo ok" 2>/dev/null || true)
+_check "Sandbox MDs  : $SANDBOX_WORKSPACE_ROOT/"  "$MD_V"
 
 # fastmcp in skill venv
 FM_V=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
@@ -840,11 +791,13 @@ _check "fastmcp venv : $SKILL_VENV"  "$FM_V"
 GAMES_V=$([ -f "$SCRIPT_DIR/StudyBreakGames/dist/index.html" ] && echo ok || echo fail)
 _check "Games SPA    : StudyBreakGames/dist/"  "$GAMES_V"
 
-# RAG services: ingestor + RAG server
-INGESTOR_V=$(curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1 && echo ok || echo fail)
-_check "Ingestor     : http://localhost:8082"  "$INGESTOR_V"
-RAG_V=$(curl -sf --max-time 3 "http://localhost:8081/v1/health" >/dev/null 2>&1 && echo ok || echo fail)
-_check "RAG server   : http://localhost:8081"  "$RAG_V"
+# If RAG mode: ingestor + RAG server
+if $USE_RAG; then
+  INGESTOR_V=$(curl -sf --max-time 3 "http://localhost:8082/v1/health" >/dev/null 2>&1 && echo ok || echo fail)
+  _check "Ingestor     : http://localhost:8082"  "$INGESTOR_V"
+  RAG_V=$(curl -sf --max-time 3 "http://localhost:8081/v1/health" >/dev/null 2>&1 && echo ok || echo fail)
+  _check "RAG server   : http://localhost:8081"  "$RAG_V"
+fi
 
 # =============================================================================
 # Done
@@ -879,5 +832,5 @@ echo "    openshell sandbox exec -n $SANDBOX_NAME -- \\"
 echo "      ${SKILL_VENV}/bin/python3 ${SANDBOX_SKILL_ROOT}/scripts/setup_config.py"
 echo ""
 echo "  Restart MCP server:"
-echo "    kill \$(cat $MCP_PID_FILE) && bash $SCRIPT_DIR/install.sh $SANDBOX_NAME"
+echo "    kill \$(cat $MCP_PID_FILE) && bash $SCRIPT_DIR/install.sh${USE_RAG:+ --rag} $SANDBOX_NAME"
 echo ""
