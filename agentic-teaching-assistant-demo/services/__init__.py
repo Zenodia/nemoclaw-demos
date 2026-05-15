@@ -19,7 +19,6 @@ from .quiz_service import QuizService
 from .curriculum_service import CurriculumService, StudyMaterialInfo, TopicCompletionResult
 from .file_service import FileService, FileValidationResult, FileUploadResult
 from .calendar_service import CalendarService, CalendarEventResult, CalendarEventData
-from .planner_service import PlannerService, PlannerResult, PlannerBlock
 
 __all__ = [
     "QuizService",
@@ -32,7 +31,4 @@ __all__ = [
     "CalendarService",
     "CalendarEventResult",
     "CalendarEventData",
-    "PlannerService",
-    "PlannerResult",
-    "PlannerBlock",
 ]

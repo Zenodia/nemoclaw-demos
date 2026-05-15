@@ -10,11 +10,15 @@ Tools (grouped by function):
   Files & Ingestion  : get_upload_link, ingest_uploaded_pdf, upload_pdf,
                        check_ingest_status, delete_user_data, delete_all_data
   Curriculum         : generate_curriculum, get_curriculum
-  Chat               : chat_message
+  Chat               : study_material_query, chitchat, supplement_query
   Quiz               : list_subtopics, generate_quiz, submit_quiz
-  Planner            : plan_study_week
   Extras             : book_calendar, youtube_search
   Admin              : health_check
+
+Chat tool selection (no host-side LLM dispatcher — the agent picks):
+  - study_material_query : RAG-backed answer about uploaded PDFs
+  - chitchat             : friendly conversation with the study-buddy persona
+  - supplement_query     : general / supplementary knowledge unrelated to the PDFs
 
 PDF Upload Flow (OpenClaw / sandbox users)
 ------------------------------------------
@@ -402,28 +406,76 @@ async def get_curriculum(user_id: str) -> str:
 
 # ===========================================================================
 # ── Chat ────────────────────────────────────────────────────────────────────
+#
+# The three tools below are deterministic per-intent endpoints — there is no
+# LLM router on the host. The agent (which already has its own LLM) decides
+# which one to call based on the user's intent.
 # ===========================================================================
 
-@mcp.tool()
-async def chat_message(user_id: str, message: str) -> str:
-    """Send a message to the AI study buddy and receive a response.
-
-    The router automatically classifies the query (study material, chitchat,
-    quiz request, calendar booking, etc.) and calls the appropriate handler.
-    When the intent is ambiguous the assistant will ask for clarification.
-
-    Args:
-        user_id: Unique user identifier.
-        message: The user's message or question.
-
-    Returns:
-        JSON with 'response' text, 'tool_used', and optionally structured data.
-    """
+async def _chat_with_tool(user_id: str, message: str, tool: str) -> str:
+    """Helper: POST to /api/chat/message with a pre-selected handler."""
     try:
-        result = await _post("/api/chat/message", {"user_id": user_id, "message": message})
+        result = await _post(
+            "/api/chat/message",
+            {"user_id": user_id, "message": message, "tool": tool},
+        )
         return json.dumps(result, indent=2)
     except Exception as ex:
         return f"Error: {type(ex).__name__}: {ex}"
+
+
+@mcp.tool()
+async def study_material_query(user_id: str, message: str) -> str:
+    """Answer a question about the user's uploaded study material (RAG-backed).
+
+    Use this when the user asks anything about the content of their PDFs:
+    explanations, summaries, examples, definitions, "what does X mean",
+    "explain this concept", "give me an example of …", etc.
+
+    Args:
+        user_id: Unique user identifier.
+        message: The user's question.
+
+    Returns:
+        JSON with 'content' and 'tool_used' (study_material).
+    """
+    return await _chat_with_tool(user_id, message, "study_material")
+
+
+@mcp.tool()
+async def chitchat(user_id: str, message: str) -> str:
+    """Friendly small-talk reply in the study-buddy persona.
+
+    Use this for greetings, encouragement, casual conversation, or anything
+    that is NOT a question about the study material and NOT a request for
+    supplemental knowledge.
+
+    Args:
+        user_id: Unique user identifier.
+        message: The user's message.
+
+    Returns:
+        JSON with 'content' and 'tool_used' (chitchat).
+    """
+    return await _chat_with_tool(user_id, message, "chitchat")
+
+
+@mcp.tool()
+async def supplement_query(user_id: str, message: str) -> str:
+    """Answer a general / supplemental knowledge question (NOT from the PDFs).
+
+    Use this when the user asks something outside their uploaded material —
+    background information, related topics, definitions of terms not in the
+    PDFs, real-world context, etc.
+
+    Args:
+        user_id: Unique user identifier.
+        message: The user's question.
+
+    Returns:
+        JSON with 'content' and 'tool_used' (supplement).
+    """
+    return await _chat_with_tool(user_id, message, "supplement")
 
 
 # ===========================================================================
@@ -526,67 +578,7 @@ async def book_calendar(user_id: str, text: str) -> str:
         JSON with 'ics_content' (calendar event text) and event metadata.
     """
     try:
-        result = await _post("/api/calendar/create", {"user_id": user_id, "description": text})
-        return json.dumps(result, indent=2)
-    except Exception as ex:
-        return f"Error: {type(ex).__name__}: {ex}"
-
-
-@mcp.tool()
-async def plan_study_week(
-    user_id: str,
-    request: str = "Plan my week",
-    course_schedule: str = "",
-    assignments: list[str] | None = None,
-    availability: str = "",
-    timezone: str = "Europe/Paris",
-    start_date: str = "",
-    days: int = 7,
-    daily_study_limit_hours: float = 3.0,
-    create_calendar_events: bool = False,
-) -> str:
-    """Create an academic weekly study plan.
-
-    Use this when the user asks to plan their week, build a study schedule,
-    prioritize assignments/deadlines, or turn their curriculum into calendar
-    blocks. If schedule details are missing, the response includes follow-up
-    questions the agent should ask.
-
-    Args:
-        user_id: Unique user identifier.
-        request: Natural-language planning request.
-        course_schedule: Classes, labs, work, or recurring commitments.
-        assignments: Assignment/exam/deadline descriptions.
-        availability: Free study windows or preferred study times.
-        timezone: IANA timezone name.
-        start_date: Optional YYYY-MM-DD start date.
-        days: Number of days to plan.
-        daily_study_limit_hours: Max study hours per day.
-        create_calendar_events: Include ICS text for each planned block.
-
-    Returns:
-        JSON with markdown plan, blocks, assumptions, follow-up questions, and
-        a calendar_download_url when create_calendar_events is true.
-    """
-    try:
-        result = await _post(
-            "/api/planner/week",
-            {
-                "user_id": user_id,
-                "request": request,
-                "course_schedule": course_schedule,
-                "assignments": assignments or [],
-                "availability": availability,
-                "timezone": timezone,
-                "start_date": start_date or None,
-                "days": days,
-                "daily_study_limit_hours": daily_study_limit_hours,
-                "create_calendar_events": create_calendar_events,
-            },
-        )
-        download_path = result.get("calendar_download_path")
-        if download_path:
-            result["calendar_download_url"] = f"{_HOST_EXTERNAL_URL.rstrip('/')}{download_path}"
+        result = await _post("/api/calendar/create", {"user_id": user_id, "text": text})
         return json.dumps(result, indent=2)
     except Exception as ex:
         return f"Error: {type(ex).__name__}: {ex}"

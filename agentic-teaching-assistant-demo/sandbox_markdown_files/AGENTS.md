@@ -18,14 +18,6 @@ When a user wants to share an image, photo, diagram, or screenshot:
 2. Share the URL — the page loads their study context automatically
 3. After user says "done", call **`get_last_vlm_response`** to retrieve the answer into chat
 
-## Academic Planning Flow
-When a user asks to plan their week, create a study schedule, prioritize assignments, or organize deadlines:
-1. Use **`plan_study_week`** from `ai_teaching_assistant_skills`
-2. Include the user's schedule, assignments/deadlines, availability, timezone, and planning horizon when they provide them
-3. If those details are missing, ask concise follow-up questions instead of inventing fixed class times or due dates
-4. If the user wants a downloadable calendar, call **`plan_study_week --create-calendar-events`** and share the returned `calendar_download_url`
-5. Use **`book_calendar`** only when the user wants a single standalone `.ics` calendar event
-
 ## Tool Priority Order
 1. `ai_teaching_assistant_skills` (always first)
 2. Other available tools as needed

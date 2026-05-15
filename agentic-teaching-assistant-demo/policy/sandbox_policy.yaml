@@ -9,9 +9,9 @@ filesystem_policy:
     - /app
     - /etc
     - /var/log
-    - /sandbox/.openclaw
   read_write:
     - /sandbox
+    - /sandbox/.openclaw
     - /sandbox/.openclaw-data
     - /sandbox/.nemoclaw
     - /tmp
