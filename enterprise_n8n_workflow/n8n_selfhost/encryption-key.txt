@@ -1,0 +1,14 @@
+<<<REDACTED — do NOT commit a real n8n encryption key here>>>
+
+n8n auto-generates a per-instance encryption key on first start
+(stored in the container at /home/node/.n8n/config -> "encryptionKey").
+
+This key only matters if you re-import a *real* (secret-bearing) credentials
+export onto another instance. The credentials-export.json in this repo is a
+SANITIZED template (no secrets), so a fresh instance just generates its own key
+and you create credentials with YOUR OWN keys — see
+preserving_n8n_workflow_for_reuse_steps.md ("Using your own API keys").
+
+To read your own instance's key (keep it private, never commit):
+  docker exec n8n cat /home/node/.n8n/config \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['encryptionKey'])"

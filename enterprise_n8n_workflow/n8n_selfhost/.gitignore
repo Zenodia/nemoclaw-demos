@@ -1,0 +1,5 @@
+# Never commit real secrets
+private/
+*.SECRET.*
+*.secret
+.creds-raw.json

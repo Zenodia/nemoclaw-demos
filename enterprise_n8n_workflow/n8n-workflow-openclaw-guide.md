@@ -1,9 +1,11 @@
 # Enterprise n8n Workflow — OpenClaw Guide
 
-Run enterprise n8n workflows from inside a NemoClaw sandbox via OpenClaw chat. The agent picks the workflow, triggers it with a natural-language query (e.g. _"find me files containing 'roadmap' in OneDrive"_, _"find NVbugs related to NeMo"_), and returns the consolidated result. Chat/agent workflows are triggered through their n8n **webhook** (synchronous, `responseMode=lastNode`) so the reply comes back in a single call — no polling required.
+Run an enterprise n8n workflow from inside a NemoClaw sandbox via OpenClaw chat. The agent picks the **EnterpriseOrchestrator** workflow, triggers it with a natural-language task (e.g. _"inference pod cluster-3 is down, restore service"_), and returns the consolidated result — a guardrailed execution plan. Chat/agent workflows are triggered through their n8n **webhook** (synchronous, `responseMode=lastNode`) so the reply comes back in a single call — no polling required.
 
 ```
-sandbox skill venv  ──►  host:4300 (n8n_mcp_server.py wrapper)  ──►  n8n.prd.astra.nvidia.com/mcp-server/http
+sandbox skill venv  ──►  host:4300 (n8n_mcp_server.py wrapper)  ──►  n8n instance /mcp-server/http
+                                                                     (self-hosted ./n8n_selfhost on :5678,
+                                                                      or a remote enterprise n8n)
 ```
 
 ---
@@ -12,12 +14,13 @@ sandbox skill venv  ──►  host:4300 (n8n_mcp_server.py wrapper)  ──► 
 
 1. [Prerequisites](#1-prerequisites)
 2. [Environment Setup](#2-environment-setup)
-3. [One-Command Install (OpenClaw + MCP)](#3-one-command-install-openclaw--mcp)
-4. [Full Workflow via OpenClaw Chat](#4-full-workflow-via-openclaw-chat)
-5. [Skill Tool Reference (CLI)](#5-skill-tool-reference-cli)
-6. [Daily Operations](#6-daily-operations)
-7. [Architecture](#7-architecture)
-8. [Troubleshooting](#8-troubleshooting)
+3. [Bring up the self-hosted n8n (first!)](#3-bring-up-the-self-hosted-n8n-first)
+4. [One-Command Install (OpenClaw + MCP)](#4-one-command-install-openclaw--mcp)
+5. [Full Workflow via OpenClaw Chat](#5-full-workflow-via-openclaw-chat)
+6. [Skill Tool Reference (CLI)](#6-skill-tool-reference-cli)
+7. [Daily Operations](#7-daily-operations)
+8. [Architecture](#8-architecture)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -42,9 +45,12 @@ No GPU. No local RAG stack. No browser upload portal.
 Create a `.env` file in the repo root (`enterprise_n8n_workflow/.env`):
 
 ```bash
-# --- n8n MCP wrapper (host:4300) ---
-N8N_INSTANCE_URL=https://n8n.prd.astra.nvidia.com/mcp-server/http
-N8N_MCP_TOKEN=<your-n8n-jwt>
+# --- n8n MCP wrapper (host:4300) → points at the n8n instance ---
+# Self-hosted (bundled in ./n8n_selfhost, default for this demo):
+N8N_INSTANCE_URL=http://localhost:5678/mcp-server/http
+N8N_MCP_TOKEN=<your-n8n-api-key>
+# Or a remote enterprise n8n instead:
+# N8N_INSTANCE_URL=https://n8n.prd.astra.nvidia.com/mcp-server/http
 
 # --- Inference (OpenShell gateway provider + nemoclaw onboard) ---
 INFERENCE_API_KEY=nvapi-...
@@ -58,15 +64,62 @@ INFERENCE_MODEL=aws/anthropic/bedrock-claude-sonnet-4-6
 
 All five core variables are required. `install.sh` fails fast if any are missing.
 
+> **Using the bundled self-hosted n8n?** Set `N8N_INSTANCE_URL=http://localhost:5678/mcp-server/http`
+> and bring n8n up **first** — see [Section 3](#3-bring-up-the-self-hosted-n8n-first).
+> `N8N_MCP_TOKEN` is an n8n API key you create in that instance (Settings → API).
+
 > **`INFERENCE_API_KEY` / `INFERENCE_BASE_URL` / `INFERENCE_MODEL`** drive `nemoclaw onboard` non-interactively (no clicking through provider/model pickers). The script picks the `custom` (OpenAI-compatible) provider, points it at `INFERENCE_BASE_URL`, and passes `INFERENCE_API_KEY` as `COMPATIBLE_API_KEY`. The OpenShell gateway provider is then created (or updated) with `--credential INFERENCE_API_KEY` and `--config NVIDIA_BASE_URL=$INFERENCE_BASE_URL`, and `openclaw.json` inside the sandbox is patched to make `inference/$INFERENCE_MODEL` the agent's primary model.
 
 > **`N8N_INSTANCE_URL` / `N8N_MCP_TOKEN`** are read by `n8n_mcp_server.py` (the host wrapper) — never sent to the sandbox.
 
 ---
 
-## 3. One-Command Install (OpenClaw + MCP)
+## 3. Bring up the self-hosted n8n (first!)
 
-After `.env` is populated, run:
+The host wrapper (`n8n_mcp_server.py`) connects to `N8N_INSTANCE_URL`. When that's
+the bundled self-hosted n8n (`http://localhost:5678/...`), **n8n must already be
+running and reachable before `install.sh` Step 5 starts the wrapper** — otherwise
+the wrapper comes up but every tool call fails to reach n8n.
+
+Order: **self-hosted n8n up → then `install.sh`**.
+
+```bash
+cd n8n_selfhost
+
+# 1. Start n8n (Docker volume + container on :5678)
+bash 0_build_and_run_docker.sh
+
+# 2. Import the EnterpriseOrchestrator + 3 sub-workflows
+docker cp workflows-export.json n8n:/home/node/.n8n/
+docker exec n8n n8n import:workflow --input=/home/node/.n8n/workflows-export.json
+
+# 3. Add YOUR own model credential + activate all 4 workflows, then restart
+#    (full walkthrough — credentials, model, activation, verify):
+#    see n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md
+for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
+  docker exec n8n n8n update:workflow --id=$id --active=true
+done
+docker restart n8n
+
+# 4. Create an n8n API key (UI → Settings → n8n API) and put it in .env as N8N_MCP_TOKEN.
+
+# 5. Confirm n8n + webhook are live
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5678/webhook/agent-hub \
+  -H "Content-Type: application/json" -d '{"chatInput":"ping"}'   # 200 = ready
+cd ..
+```
+
+> Full detail (bring-your-own-key, model field, activation order, troubleshooting)
+> lives in **[`n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md`](n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md)**.
+> Using a remote enterprise n8n instead? Skip this section and point
+> `N8N_INSTANCE_URL` at it.
+
+---
+
+## 4. One-Command Install (OpenClaw + MCP)
+
+With the n8n instance up ([Section 3](#3-bring-up-the-self-hosted-n8n-first)) and
+`.env` populated, run:
 
 ```bash
 bash install.sh [sandbox-name]
@@ -102,7 +155,7 @@ bash install.sh [sandbox-name]
 | 4 | Detect sandbox; if none, run `nemoclaw onboard --non-interactive` with `NEMOCLAW_PROVIDER=custom`, `NEMOCLAW_ENDPOINT_URL=$INFERENCE_BASE_URL`, `NEMOCLAW_MODEL=$INFERENCE_MODEL`, `COMPATIBLE_API_KEY=$INFERENCE_API_KEY` | skipped if sandbox exists |
 | 4b | `openshell provider create/update` + `openshell inference set` | provider update/create idempotent |
 | 4c | Patch `/sandbox/.openclaw/openclaw.json` inside sandbox → set `inference/$INFERENCE_MODEL` as primary | always re-applied |
-| 5 | Start `n8n_mcp_server.py` on `127.0.0.1:4300/mcp` (background, auto-restart, logs `/tmp/n8n-mcp.log`) | skipped if port responding |
+| 5 | Start `n8n_mcp_server.py` on `127.0.0.1:4300/mcp` (background, auto-restart, logs `/tmp/n8n-mcp.log`). **Requires the n8n instance from [Section 3](#3-bring-up-the-self-hosted-n8n-first) to be reachable at `N8N_INSTANCE_URL`.** | skipped if port responding |
 | 6 | Apply `policy/sandbox_policy.yaml` (skill venv → port 4300) | always re-applied |
 | 7 | Upload `n8n_workflow_skills/` → `/sandbox/.openclaw/workspace/skills/n8n-workflow-skills` + HEARTBEAT to workspace root | always re-uploaded |
 | 8 | Write `config.json` with server_url + polling tunables | always re-written |
@@ -120,7 +173,7 @@ Expected final output:
 
 ---
 
-## 4. Full Workflow via OpenClaw Chat
+## 5. Full Workflow via OpenClaw Chat
 
 Connect to the sandbox:
 
@@ -196,66 +249,65 @@ Then open the Browser URL printed by `install.sh` in your laptop browser.
 ---
 
 
-### Conversation pattern
+### Sample queries to try
 
-Incident Response
+The **EnterpriseOrchestrator** runs every task through
+`policy_guard → task_router → cost_gate → execution plan`. Paste any of these into
+the OpenClaw chat (the agent calls `list_workflows` then `execute_workflow`):
 
+**Incident Response** — routed `incident`, high/critical priority:
+```
 ALERT: inference pod cluster-3 is down and failing health checks, restore service immediately
 inference latency spiked to 45 seconds on A100-cluster-01, investigate and remediate
 GPU memory overflow detected on worker node 7, prevent cascading failure
+```
 
-Finance / Budget
-
+**Finance / Budget** — routed `finance`, checked against the daily budget:
+```
 Review current GPU spend against Q2 budget and flag any overage
 Generate a cost breakdown report for all active Nemotron inference jobs this month
 Forecast AI Factory compute costs for next quarter based on current utilization trends
+```
 
-Policy Violation (should be blocked)
-
+**Policy Violation** — `policy_guard` should **block** these (no plan returned):
+```
 delete_all checkpoints from training cluster to free up storage
 override_budget limit for this sprint to run extra fine-tuning jobs
 disable_guardrails on the privacy router for faster inference
-
 ```
 
-ALERT: inference pod cluster-3 is down and failing health checks, restore service immediately
+### What a run looks like
+
+```
 You:   what n8n workflows can I run?
-Agent: [calls $SKILL list_workflows — filters canExecute && availableInMCP && active]
-       1. OneDrive Search       (id=wf-abc123) — Search files by name across user's OneDrive
-       2. NVBug Lookup          (id=wf-def456) — Search NVbugs by keyword / product / assignee
-       3. GDrive Recent Files   (id=wf-ghi789) — List recently modified Google Drive docs
+Agent: [calls list_workflows]
+       - EnterpriseOrchestrator (id=TzLcGZKuV0TZxXHs) — runs policy_guard → task_router → cost_gate → plan
 
-You:   what does the OneDrive search one do?
-Agent: [calls $SKILL describe_workflow --workflow-id wf-abc123]
-       OneDrive Search — accepts a chat query, searches files by name across the
-       user's OneDrive, returns top matches with deep links.
+You:   ALERT: inference pod cluster-3 is down and failing health checks, restore service immediately
+Agent: [calls execute_workflow --workflow-id TzLcGZKuV0TZxXHs --query "<the alert>"]
+       ✅ Guardrails passed:
+         • policy_guard → allowed
+         • task_router  → category=incident, priority=critical
+         • cost_gate    → approved ($10 of $100 daily budget)
+       Execution plan: { phase_1_triage, phase_2_remediation, ... }
 
-You:   find me files containing 'roadmap' in OneDrive
-Agent: [calls $SKILL execute_workflow --workflow-id wf-abc123 --query "find files containing 'roadmap' in OneDrive"
-        polls every 3s until terminal status
-        returns consolidated output]
-       Found 4 files in OneDrive matching 'roadmap':
-         1. 2026-roadmap-q1.pptx
-         2. NeMo-roadmap-draft.docx
-         ...
-
-You:   find NVbugs related to NeMo
-Agent: [picks the NVBug Lookup workflow id, calls execute_workflow with that query]
-       Found 12 NVbugs related to NeMo:
-         NVB-9912 — NeMo tokenizer leak on resume
-         NVB-9847 — Conversion failure for NeMo 2.0 checkpoints
-         ...
+You:   disable_guardrails on the privacy router for faster inference
+Agent: [calls execute_workflow with that query]
+       🚫 policy_guard DENIED — action matches a restricted policy pattern. No plan produced.
 ```
+
+> The guardrail thresholds (blocked patterns, $100 daily budget, category/priority
+> rules) live in the 3 sub-workflows' JavaScript Code nodes — tune them there.
 
 ### Hard rules baked into HEARTBEAT.md
 
 - Agent never invents a workflow id. Always `list_workflows` first.
-- `execute_workflow` polls until terminal status (`success` / `error` / `crashed` / `canceled`). Output is returned verbatim.
+- `execute_workflow` returns the workflow's final output synchronously (the wrapper POSTs the n8n webhook; no polling).
 - If `list_workflows` returns empty: user lacks `workflow:execute` permission in n8n, or workflows missing "Available in MCP" toggle. Suggest contacting a project admin.
 
 ---
 
-## 5. Skill Tool Reference (CLI)
+## 6. Skill Tool Reference (CLI)
 
 `SKILL=$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/n8n_client.py` where `SKILL_DIR=/sandbox/.openclaw/workspace/skills/n8n-workflow-skills`.
 
@@ -279,15 +331,14 @@ SKILL="$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/n8n_client.py"
 
 $SKILL n8n_health
 $SKILL list_workflows
-$SKILL describe_workflow --workflow-id wf-abc123
-$SKILL execute_workflow --workflow-id wf-abc123 \
-  --query "find files containing 'roadmap' in OneDrive" \
-  --poll-interval 3 --poll-timeout 600
+$SKILL describe_workflow --workflow-id TzLcGZKuV0TZxXHs
+$SKILL execute_workflow --workflow-id TzLcGZKuV0TZxXHs \
+  --query "inference pod cluster-3 is down and failing health checks, restore service immediately"
 ```
 
 ---
 
-## 6. Daily Operations
+## 7. Daily Operations
 
 ```bash
 # If the wrapper runs as a systemd service (reboot-durable, auto-restart):
@@ -326,7 +377,7 @@ python3 n8n_mcp_server.py --host 127.0.0.1 --port 4300 --path /mcp
 
 ---
 
-## 7. Architecture
+## 8. Architecture
 
 ```
 User (OpenClaw chat in NemoClaw sandbox)
@@ -339,17 +390,17 @@ Host wrapper: n8n_mcp_server.py  (FastMCP, port 4300)
      │  meta-tools:    list_n8n_tools / call_n8n_tool / n8n_health
      │  webhook tool:  execute_chat_workflow  (POSTs the workflow webhook directly)
      │  reads N8N_INSTANCE_URL + N8N_MCP_TOKEN from .env
-     ├──► Remote n8n MCP: https://n8n.prd.astra.nvidia.com/mcp-server/http
+     ├──► n8n MCP API: $N8N_INSTANCE_URL  (e.g. http://localhost:5678/mcp-server/http)
      │       exposes search_workflows / get_workflow_details / execute_workflow / get_execution / ...
      │       (used for discovery: list_workflows, describe_workflow, webhook-path resolution)
-     └──► n8n webhook: https://n8n.prd.astra.nvidia.com/webhook/<path>
+     └──► n8n webhook: http://localhost:5678/webhook/<path>
              POST {"chatInput": "..."} → runs the orchestrator → returns final output
      ▼
-Enterprise n8n engine
-     │  triggers workflow nodes (OneDrive / GDrive / NVBug / Jira / Slack / ...)
+n8n engine  (self-hosted ./n8n_selfhost on :5678, or a remote enterprise n8n)
+     │  EnterpriseOrchestrator AI Agent → policy_guard / task_router / cost_gate sub-workflows
 ```
 
-> **Why a webhook for execution?** The remote n8n MCP `execute_workflow` tool does
+> **Why a webhook for execution?** The n8n MCP `execute_workflow` tool does
 > **not** inject `chatInput` into webhook-triggered workflows — the webhook node
 > fires with an empty body, so the AI Agent gets an empty prompt (`No prompt
 > specified`). The wrapper's `execute_chat_workflow` resolves the workflow's
@@ -361,6 +412,7 @@ Enterprise n8n engine
 
 | File | Purpose |
 |---|---|
+| `n8n_selfhost/` | Bundled self-hosted n8n: build script, workflow export, sanitized cred template + redeploy guide (start this first — [Section 3](#3-bring-up-the-self-hosted-n8n-first)) |
 | `install.sh` | One-command installer (10 steps, idempotent) |
 | `n8n_mcp_server.py` | Host FastMCP wrapper (port 4300) — 3 meta-tools + `execute_chat_workflow` (webhook POST) |
 | `n8n_mcp_client.py` | Standalone host-side interactive CLI (workflow picker → query → wait) |
@@ -390,9 +442,9 @@ The host wrapper exposes 3 thin meta-tools (`list_n8n_tools`, `call_n8n_tool`, `
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
-**Skill returns "Name or service not known" pointing at `n8n.prd.astra.nvidia.com`**
+**Skill returns "Name or service not known" pointing at `n8n.prd.astra.nvidia.com`** *(remote-n8n only — N/A when using the bundled self-host on `localhost:5678`)*
 
 The wrapper itself is healthy; it just can't resolve the NVIDIA-internal hostname. Verify on the host:
 
