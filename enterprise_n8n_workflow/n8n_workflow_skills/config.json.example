@@ -1,0 +1,5 @@
+{
+  "server_url": "http://host.openshell.internal:4300/mcp",
+  "poll_interval_sec": 3,
+  "poll_timeout_sec": 600
+}
