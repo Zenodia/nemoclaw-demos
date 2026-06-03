@@ -1,0 +1,204 @@
+# AgenticTA CI/CD Pipeline
+# Direct Docker build and push using Makefile (no CI Toolkit)
+# For deployment in astra-projects group
+#
+# Version Management:
+#   - Compares version.py with agenticta-deploy for both frontend and games
+#   - Only builds components where versions differ
+#   - Developer manually bumps version.py for new releases
+
+default:
+  tags:
+    - ape-repo-k8s  # NVIDIA internal Kubernetes runner
+
+stages:
+  - check-version
+  - build-and-push
+  - update-deployment
+
+variables:
+  DOCKER_REGISTRY: "artifactory.nvidia.com"
+  DOCKER_REGISTRY_PREFIX: "it-continum/agenticta"
+
+# Check if versions differ from deploy repo
+check-version:
+  stage: check-version
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git
+  script:
+    # Get local versions
+    - FRONTEND_LOCAL=$(grep VERSION version.py | cut -d'"' -f2)
+    - GAMES_LOCAL=$(grep VERSION StudyBreakGames/version.py | cut -d'"' -f2)
+    - echo "Local versions:"
+    - echo "  Frontend - $FRONTEND_LOCAL"
+    - echo "  Games    - $GAMES_LOCAL"
+    # Clone deploy repo
+    - git clone --depth 1 https://oauth2:${DEPLOY_REPO_TOKEN}@gitlab-master.nvidia.com/ape-repo/astra-projects/personalized-agentic-study-buddy/agenticta-deploy.git /tmp/deploy
+    # Extract deployed versions (grep -A 20 gets 20 lines after section header)
+    - FRONTEND_DEPLOY=$(grep -A 20 "^  frontend:" /tmp/deploy/deployment/stg/values.yaml | grep "tag:" | head -1 | awk '{print $2}' | tr -d '"')
+    - GAMES_DEPLOY=$(grep -A 20 "^  study-break-games:" /tmp/deploy/deployment/stg/values.yaml | grep "tag:" | head -1 | awk '{print $2}' | tr -d '"')
+    - echo "Deployed versions:"
+    - echo "  Frontend - $FRONTEND_DEPLOY"
+    - echo "  Games    - $GAMES_DEPLOY"
+    # Compare and set flags
+    - |
+      echo ""
+      if [ "$FRONTEND_LOCAL" != "$FRONTEND_DEPLOY" ]; then
+        echo "Frontend: $FRONTEND_DEPLOY -> $FRONTEND_LOCAL (CHANGED)"
+        echo "BUILD_FRONTEND=true" >> version.env
+      else
+        echo "Frontend: $FRONTEND_LOCAL (unchanged)"
+        echo "BUILD_FRONTEND=false" >> version.env
+      fi
+      if [ "$GAMES_LOCAL" != "$GAMES_DEPLOY" ]; then
+        echo "Games: $GAMES_DEPLOY -> $GAMES_LOCAL (CHANGED)"
+        echo "BUILD_GAMES=true" >> version.env
+      else
+        echo "Games: $GAMES_LOCAL (unchanged)"
+        echo "BUILD_GAMES=false" >> version.env
+      fi
+    - echo "FRONTEND_VERSION=$FRONTEND_LOCAL" >> version.env
+    - echo "GAMES_VERSION=$GAMES_LOCAL" >> version.env
+    - echo ""
+    - echo "=== version.env ==="
+    - cat version.env
+  artifacts:
+    reports:
+      dotenv: version.env
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[skip ci\]/'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+
+# Build and push Docker images
+build-and-push:
+  stage: build-and-push
+  timeout: 2h
+  image: docker:24-dind
+  needs:
+    - job: check-version
+      artifacts: true
+  services:
+    - name: docker:24-dind
+      alias: docker
+      command: ["--tls=false"]
+      variables:
+        DOCKER_TLS_CERTDIR: ""
+  variables:
+    DOCKER_HOST: tcp://localhost:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: "1"
+    FF_NETWORK_PER_BUILD: "true"
+    KUBERNETES_SERVICE_HOST_NETWORKING: "true"
+    KUBERNETES_POD_ANNOTATIONS_1: "container.apparmor.security.beta.kubernetes.io/build=unconfined"
+    KUBERNETES_POD_ANNOTATIONS_2: "container.apparmor.security.beta.kubernetes.io/helper=unconfined"
+  before_script:
+    - echo "Installing make..."
+    - apk add --no-cache make
+    - echo "Waiting for Docker daemon..."
+    - until docker info; do sleep 1; done
+    - echo "Docker is ready!"
+  script:
+    - echo "BUILD_FRONTEND=$BUILD_FRONTEND, BUILD_GAMES=$BUILD_GAMES"
+    - |
+      if [ "$BUILD_FRONTEND" != "true" ] && [ "$BUILD_GAMES" != "true" ]; then
+        echo "No version changes detected - skipping build"
+        exit 0
+      fi
+    # Build frontend if changed
+    - |
+      if [ "$BUILD_FRONTEND" = "true" ]; then
+        echo "Building frontend v$FRONTEND_VERSION..."
+        make frontend-build-stg
+      else
+        echo "Skipping frontend build (unchanged)"
+      fi
+    # Build games if changed
+    - |
+      if [ "$BUILD_GAMES" = "true" ]; then
+        echo "Building games v$GAMES_VERSION..."
+        make games-build
+      else
+        echo "Skipping games build (unchanged)"
+      fi
+    # Login to registry
+    - echo "Logging in to Artifactory..."
+    - echo "$IT_ASTRA_DOCKER_LOCAL_PASSWORD" | docker login $DOCKER_REGISTRY -u "$IT_ASTRA_DOCKER_LOCAL_USERNAME" --password-stdin
+    # Push frontend if built
+    - |
+      if [ "$BUILD_FRONTEND" = "true" ]; then
+        echo "Pushing frontend v$FRONTEND_VERSION..."
+        make frontend-push-stg
+      fi
+    # Push games if built
+    - |
+      if [ "$BUILD_GAMES" = "true" ]; then
+        echo "Pushing games v$GAMES_VERSION..."
+        make games-push
+      fi
+    - echo ""
+    - echo "Build and push complete!"
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[skip ci\]/'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+
+# Update deployment repo with new versions
+update-deployment:
+  stage: update-deployment
+  image: alpine:latest
+  needs:
+    - job: check-version
+      artifacts: true
+    - job: build-and-push
+  before_script:
+    - apk add --no-cache git bash sed
+    - git config --global user.email "ci-bot@nvidia.com"
+    - git config --global user.name "AgenticTA CI Bot"
+  script:
+    - echo "BUILD_FRONTEND=$BUILD_FRONTEND, BUILD_GAMES=$BUILD_GAMES"
+    - |
+      if [ "$BUILD_FRONTEND" != "true" ] && [ "$BUILD_GAMES" != "true" ]; then
+        echo "No version changes - skipping deployment update"
+        exit 0
+      fi
+    - git clone https://oauth2:${DEPLOY_REPO_TOKEN}@gitlab-master.nvidia.com/ape-repo/astra-projects/personalized-agentic-study-buddy/agenticta-deploy.git
+    - cd agenticta-deploy
+    - VALUES_FILE="deployment/stg/values.yaml"
+    # Update frontend version if changed (use sed directly - the script uses gawk features)
+    - |
+      if [ "$BUILD_FRONTEND" = "true" ]; then
+        echo "Updating frontend to v$FRONTEND_VERSION..."
+        # Update tag in frontend section (between "frontend:" and next app section)
+        sed -i '/^  frontend:/,/^  [a-z]/{s/\(tag: *\)[0-9."]*/\1'"$FRONTEND_VERSION"'/}' "$VALUES_FILE"
+        echo "Frontend tag updated in values.yaml"
+      fi
+    # Update games version if changed
+    - |
+      if [ "$BUILD_GAMES" = "true" ]; then
+        echo "Updating games to v$GAMES_VERSION..."
+        sed -i '/^  study-break-games:/,/^  [a-z]/{s/\(tag: *\)[0-9."]*/\1'"$GAMES_VERSION"'/}' "$VALUES_FILE"
+        echo "Games tag updated in values.yaml"
+      fi
+    # Show changes and commit
+    - grep -A 10 "frontend:" "$VALUES_FILE" | grep "tag:" | head -1
+    - grep -A 10 "study-break-games:" "$VALUES_FILE" | grep "tag:" | head -1
+    - git add "$VALUES_FILE"
+    - |
+      if [ "$BUILD_FRONTEND" = "true" ] && [ "$BUILD_GAMES" = "true" ]; then
+        git commit --signoff -m "Update frontend to v$FRONTEND_VERSION, games to v$GAMES_VERSION"
+      elif [ "$BUILD_FRONTEND" = "true" ]; then
+        git commit --signoff -m "Update frontend to v$FRONTEND_VERSION"
+      else
+        git commit --signoff -m "Update games to v$GAMES_VERSION"
+      fi
+    - git push
+    - echo "Deployment repo updated!"
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[skip ci\]/'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
