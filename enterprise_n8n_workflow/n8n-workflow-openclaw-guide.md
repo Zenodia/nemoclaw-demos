@@ -90,23 +90,67 @@ cd n8n_selfhost
 bash 0_build_and_run_docker.sh
 
 # 2. Import the EnterpriseOrchestrator + 3 sub-workflows
+#    ⚠ Import always deactivates workflows — publish them AFTER import (step 3).
 docker cp workflows-export.json n8n:/home/node/.n8n/
 docker exec n8n n8n import:workflow --input=/home/node/.n8n/workflows-export.json
 
-# 3. Add YOUR own model credential + activate all 4 workflows, then restart
-#    (full walkthrough — credentials, model, activation, verify):
+# 3. Publish all 4 workflows, THEN restart
+#    (n8n 2.22+: use publish:workflow — update:workflow is deprecated)
+#    Full walkthrough — credentials, model, activation, verify:
 #    see n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md
 for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
-  docker exec n8n n8n update:workflow --id=$id --active=true
+  docker exec n8n n8n publish:workflow --id=$id
 done
 docker restart n8n
+# Confirm all 4 register at boot:
+docker logs n8n --since 30s 2>&1 | grep -A5 'Start Active Workflows'
 
-# 4. Create an n8n API key (UI → Settings → n8n API) and put it in .env as N8N_MCP_TOKEN.
+# 4. Sign in at http://localhost:5678 and create an n8n API key
+#    (Settings → n8n API) → put it in .env as N8N_MCP_TOKEN.
+#    See "Sign in to n8n" below if you don't know the email/password.
 
 # 5. Confirm n8n + webhook are live
 curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5678/webhook/agent-hub \
   -H "Content-Type: application/json" -d '{"chatInput":"ping"}'   # 200 = ready
 cd ..
+```
+
+### Sign in to n8n (owner account)
+
+The **Email / Password** screen at http://localhost:5678 is n8n's **owner account**
+(user management). It is **not** the `admin` / `changeme` values in
+`0_build_and_run_docker.sh` — those env vars (`N8N_BASIC_AUTH_*`) configure an
+optional HTTP Basic Auth layer and do not populate the UI sign-in form.
+
+On first start, n8n prompts you to create an owner (email + password). That
+account lives in the persistent Docker volume `n8n_data`, so re-running
+`0_build_and_run_docker.sh` on the same machine keeps the same login.
+
+**Forgot the password?** Reset the owner account (workflows and credentials are
+kept; only the login user is cleared):
+
+```bash
+docker exec n8n n8n user-management:reset
+docker restart n8n
+```
+
+Open http://localhost:5678 again — you'll get the first-time owner setup to pick a
+new email and password.
+
+**Look up the current owner email** (password is hashed — it cannot be read back):
+
+```bash
+docker cp n8n:/home/node/.n8n/database.sqlite /tmp/n8n-db.sqlite
+python3 -c "import sqlite3; c=sqlite3.connect('/tmp/n8n-db.sqlite'); print(list(c.execute('SELECT email FROM user')))"
+```
+
+**Full wipe** (new n8n with no prior data — you'll re-import workflows):
+
+```bash
+docker stop n8n && docker rm n8n
+docker volume rm n8n_data
+bash 0_build_and_run_docker.sh
+# then repeat steps 2–5 above
 ```
 
 > Full detail (bring-your-own-key, model field, activation order, troubleshooting)
@@ -444,6 +488,33 @@ The host wrapper exposes 3 thin meta-tools (`list_n8n_tools`, `call_n8n_tool`, `
 
 ## 9. Troubleshooting
 
+**Self-hosted n8n — sign-in page asks for email/password I don't know**
+
+The UI login is the **owner account** stored in the `n8n_data` Docker volume, not
+`admin` / `changeme` from `0_build_and_run_docker.sh`. See
+[Sign in to n8n](#sign-in-to-n8n-owner-account) — run `user-management:reset` to
+create a fresh owner, or query the DB for the current email.
+
+**Self-hosted n8n — webhook returns `404` (`unknown webhook "POST agent-hub"`)**
+
+The orchestrator webhook is only registered when **EnterpriseOrchestrator** is
+**published and active**. Common causes:
+
+1. **Import after activate** — `import:workflow` deactivates all workflows. Always
+   import first, then publish, then restart.
+2. **Restart without publish** — after import, run `publish:workflow` on all four
+   IDs before `docker restart n8n`.
+
+```bash
+for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
+  docker exec n8n n8n publish:workflow --id=$id
+done
+docker restart n8n
+docker logs n8n --since 30s 2>&1 | grep 'Activated workflow'   # expect 4 lines
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5678/webhook/agent-hub \
+  -H "Content-Type: application/json" -d '{"chatInput":"ping"}'   # 200 = ready
+```
+
 **Skill returns "Name or service not known" pointing at `n8n.prd.astra.nvidia.com`** *(remote-n8n only — N/A when using the bundled self-host on `localhost:5678`)*
 
 The wrapper itself is healthy; it just can't resolve the NVIDIA-internal hostname. Verify on the host:
@@ -652,7 +723,8 @@ The workflow ran but the AI Agent received an empty prompt. Checklist:
 2. **All workflows active?** The orchestrator **and** every sub-workflow it calls
    as a tool must be active, or tool calls fail with
    `Workflow is not active and cannot be executed`:
-   `docker exec n8n n8n update:workflow --id=<id> --active=true` then restart n8n.
+   `docker exec n8n n8n publish:workflow --id=<id>` for each of the four workflow
+   IDs, then `docker restart n8n`.
 3. **Sub-workflow Code nodes return data?** Empty Code nodes surface as
    `Unknown error`. Each must `return [{ json: {...} }]`.
 4. **Code node language = JavaScript.** The stock n8n container has **no Python
