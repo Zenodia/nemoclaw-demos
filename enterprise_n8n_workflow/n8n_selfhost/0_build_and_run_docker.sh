@@ -14,4 +14,4 @@ docker run -d --name n8n \
   -e N8N_BASIC_AUTH_USER=admin \
   -e N8N_BASIC_AUTH_PASSWORD=changeme \
   `# -e N8N_ENCRYPTION_KEY="$(cat encryption-key.txt)"  # uncomment for re-deploy` \
-  docker.n8n.io/n8nio/n8n_
+  docker.n8n.io/n8nio/n8n
