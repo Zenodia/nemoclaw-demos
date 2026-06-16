@@ -58,6 +58,9 @@ The OpenShell sandbox strips `NVIDIA_API_KEY` from the environment by design —
 If NemoClaw is not yet installed, run:
 
 ```bash
+bash
+export NEMOCLAW_AGENT=openclaw
+export NEMOCLAW_INSTALL_TAG=v0.0.55
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 bash
 ```
 
