@@ -222,12 +222,13 @@ if [ "${LIVE_COUNT:-0}" -eq 0 ] && [ -z "$SANDBOX_ARG" ]; then
   esac
 
   if [ "$ONBOARD_MODEL" != "$INFERENCE_MODEL" ]; then
-    info "Onboard validation model: $ONBOARD_MODEL (runtime model in Step 4b: $INFERENCE_MODEL)"
+    info "Onboard validation model: $ONBOARD_MODEL; runtime model in Step 4b: $INFERENCE_MODEL"
   fi
 
   # --fresh avoids resuming a stale session that still has the wrong provider/model.
-  nemoclaw onboard --fresh --non-interactive --yes-i-accept-third-party-software \
-    || fail "nemoclaw onboard failed. Large models often exceed the 15s validation probe — set NEMOCLAW_ONBOARD_MODEL to a faster catalog model in .env, verify INFERENCE_* with curl, then re-run install.sh."
+  if ! nemoclaw onboard --fresh --non-interactive --yes-i-accept-third-party-software; then
+    fail "nemoclaw onboard failed. Large models often exceed the 15s validation probe. Set NEMOCLAW_ONBOARD_MODEL to a faster catalog model in .env, verify INFERENCE_* with curl, then re-run install.sh."
+  fi
   ok "Onboarding complete"
 
   info "Waiting for sandbox to appear..."
