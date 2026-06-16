@@ -194,6 +194,7 @@ uv venv --quiet --seed --allow-existing 2>/dev/null || uv venv --quiet --seed
 uv pip install --quiet --upgrade \
   "fastapi" \
   "uvicorn[standard]" \
+  "python-dotenv" \
   "haystack-ai>=2.18.1,<3.0.0" \
   "nvidia-haystack~=0.3.0" \
   "pypdf~=6.5"
@@ -207,11 +208,18 @@ echo ""
 # ── Step 7: Start Haystack RAG server as background process ──────
 info "Starting Haystack RAG server in background (port $RAG_PORT)..."
 
+if lsof -t -i:"$RAG_PORT" >/dev/null 2>&1; then
+  kill $(lsof -t -i:"$RAG_PORT") 2>/dev/null || true
+  sleep 1
+  ok "Freed port $RAG_PORT (killed stale listener)"
+fi
+
 (
   cd "$SCRIPT_DIR"
   source .venv/bin/activate
   export NVIDIA_API_KEY="$NVIDIA_API_KEY"
   while true; do
+    kill $(lsof -t -i:"$RAG_PORT") 2>/dev/null || true
     python haystack_rag_server.py \
       --port "$RAG_PORT" \
       --store-path "$SCRIPT_DIR/data/store.json" \
@@ -247,8 +255,23 @@ echo ""
 
 # ── Step 8: Onboard nemoclaw sandbox (if none exists) ────────────
 live_sandboxes() {
-  openshell sandbox list 2>/dev/null | grep -v "^No sandboxes" | grep -v "^NAME" \
-    | awk '{print $1}' | grep -v '^$' || true
+  openshell sandbox list 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | awk 'NR>1 && NF {print $1}' \
+    | grep -v '^$' || true
+}
+
+wait_for_live_sandbox() {
+  local count=0 attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    count=$(live_sandboxes | wc -l | tr -d '[:space:]')
+    if [ "${count:-0}" -gt 0 ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
 }
 
 LIVE_COUNT=$(live_sandboxes | wc -l | tr -d ' ')
@@ -280,13 +303,9 @@ if [ "${LIVE_COUNT:-0}" -eq 0 ]; then
   echo ""
 
   info "Waiting for sandbox to become ready..."
-  for i in $(seq 1 20); do
-    LIVE_COUNT=$(live_sandboxes | wc -l | tr -d ' ')
-    [ "${LIVE_COUNT:-0}" -gt 0 ] && break
-    sleep 1
-  done
-  [ "${LIVE_COUNT:-0}" -eq 0 ] && \
-    fail "No sandbox appeared after onboarding. Run 'openshell sandbox list' to check."
+  wait_for_live_sandbox \
+    || fail "No sandbox appeared after onboarding. Run 'openshell sandbox list' to check."
+  LIVE_COUNT=$(live_sandboxes | wc -l | tr -d '[:space:]')
 fi
 
 # ── Step 8b: Enforce inference provider in sandbox ───────────────
@@ -373,21 +392,102 @@ os.chmod(path, 0o600)
 # Applied per-sandbox (not global) so nemoclaw onboard's preset step can run
 # without conflict. Safe on a fresh sandbox — no filesystem_policy in our YAML
 # means nothing to remove from the sandbox image's built-in policy.
+# On a live sandbox, OpenShell may reject policy changes that remove filesystem
+# rules; upload + skill registration still proceed, but egress to port 9004 may
+# need a sandbox recreate if policy was never applied successfully.
 info "Applying sandbox network policy..."
 openshell policy set "$SANDBOX_NAME" \
   --policy "$SCRIPT_DIR/policy/sandbox_policy.yaml" \
   --wait \
   && ok "Policy applied (haystack_rag_host egress on port $RAG_PORT)" \
-  || warn "Policy set failed — check openshell logs; egress to port $RAG_PORT may be blocked"
+  || warn "Policy set failed — egress to port $RAG_PORT may be blocked (recreate sandbox if queries fail)"
 echo ""
 
-# ── Step 11: Upload haystack-rag-skills to sandbox ──────────────
-info "Uploading haystack-rag-skills to sandbox..."
-SKILL_DEST=/sandbox/.openclaw-data/workspace/skills/haystack-rag-skills
-openshell sandbox upload "$SANDBOX_NAME" \
-  "$SCRIPT_DIR/haystack-rag-skills" \
-  "$SKILL_DEST"
-ok "Skill uploaded to $SKILL_DEST"
+# ── Step 11: Install haystack-rag-skills in sandbox ─────────────
+SKILL_NAME="haystack-rag-skills"
+SKILL_SRC="$SCRIPT_DIR/haystack-rag-skills"
+# New NemoClaw sandboxes use .openclaw/workspace/skills/; legacy builds used
+# .openclaw-data/workspace/skills/. nemoclaw skill install picks the right path.
+SKILL_DEST="/sandbox/.openclaw/workspace/skills/$SKILL_NAME"
+SKILL_DEST_LEGACY="/sandbox/.openclaw-data/workspace/skills/$SKILL_NAME"
+
+enable_haystack_skill_registry() {
+  openshell sandbox exec -n "$SANDBOX_NAME" -- python3 - <<'PYEOF'
+import json, os, sys
+p = "/sandbox/.openclaw/openclaw.json"
+if not os.path.exists(p):
+    print("skip: openclaw.json not found", file=sys.stderr)
+    sys.exit(0)
+d = json.load(open(p))
+changed = False
+
+entry = d.setdefault("skills", {}).setdefault("entries", {}).setdefault("haystack-rag-skills", {})
+if entry.get("enabled") is not True:
+    entry["enabled"] = True
+    changed = True
+
+tools = d.setdefault("tools", {})
+if tools.get("profile") != "coding":
+    tools["profile"] = "coding"
+    changed = True
+
+if changed:
+    json.dump(d, open(p, "w"), indent=2)
+    print("updated")
+else:
+    print("already configured")
+PYEOF
+}
+
+restart_sandbox_openclaw() {
+  openshell sandbox exec -n "$SANDBOX_NAME" -- \
+    bash -c "pkill -TERM -f '^openclaw\$' 2>/dev/null || pkill -TERM openclaw 2>/dev/null || true"
+}
+
+resolve_skill_dest() {
+  if openshell sandbox exec -n "$SANDBOX_NAME" -- \
+    test -f "$SKILL_DEST/SKILL.md" 2>/dev/null; then
+    echo "$SKILL_DEST"
+  elif openshell sandbox exec -n "$SANDBOX_NAME" -- \
+    test -f "$SKILL_DEST_LEGACY/SKILL.md" 2>/dev/null; then
+    echo "$SKILL_DEST_LEGACY"
+  else
+    echo "$SKILL_DEST"
+  fi
+}
+
+info "Installing $SKILL_NAME in sandbox..."
+if nemoclaw "$SANDBOX_NAME" skill install "$SKILL_SRC"; then
+  ok "Skill registered via nemoclaw skill install"
+else
+  warn "nemoclaw skill install failed — falling back to openshell upload"
+  openshell sandbox upload "$SANDBOX_NAME" \
+    "$SKILL_SRC" \
+    "$SKILL_DEST" \
+    || openshell sandbox upload "$SANDBOX_NAME" \
+      "$SKILL_SRC" \
+      "$SKILL_DEST_LEGACY" \
+      || fail "Skill upload failed on both $SKILL_DEST and $SKILL_DEST_LEGACY"
+  ok "Skill uploaded (fallback path)"
+fi
+
+SKILL_DEST="$(resolve_skill_dest)"
+ok "Skill path: $SKILL_DEST"
+
+info "Enabling skill in OpenClaw registry..."
+if enable_haystack_skill_registry 2>/dev/null | grep -qE 'updated|already configured'; then
+  ok "haystack-rag-skills enabled in openclaw.json (tools.profile=coding)"
+else
+  warn "Could not update openclaw.json — add skills.entries.haystack-rag-skills.enabled=true manually"
+fi
+
+info "Restarting OpenClaw gateway inside sandbox (reload skills)..."
+if restart_sandbox_openclaw 2>/dev/null; then
+  sleep 2
+  ok "OpenClaw gateway restart signaled"
+else
+  warn "Could not restart sandbox OpenClaw — disconnect and reconnect the TUI"
+fi
 echo ""
 
 # ── Step 12: Bootstrap skill venv (requests only) ───────────────
@@ -410,6 +510,8 @@ VENV_CHECK=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
 [ "$VENV_CHECK" = "ok" ] \
   && ok "Skill venv ready ($SKILL_VENV)" \
   || fail "Skill venv verification failed — 'import requests' returned no output."
+
+ok "Skill and inference model are configured — reconnect to activate them"
 echo ""
 
 # ── Step 13: Verify ─────────────────────────────────────────────
@@ -426,8 +528,8 @@ fi
 SKILL_CHECK=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
   sh -c "test -f $SKILL_DEST/SKILL.md && echo ok" 2>/dev/null || true)
 [ "$SKILL_CHECK" = "ok" ] \
-  && ok "Skill confirmed in sandbox" \
-  || warn "SKILL.md not visible — try reconnecting"
+  && ok "Skill confirmed at $SKILL_DEST" \
+  || warn "SKILL.md not found at $SKILL_DEST — try: nemoclaw $SANDBOX_NAME skill install $SKILL_SRC"
 
 REQUESTS_CHECK=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
   "$SKILL_VENV/bin/python3" -c "import requests; print('ok')" 2>/dev/null || true)

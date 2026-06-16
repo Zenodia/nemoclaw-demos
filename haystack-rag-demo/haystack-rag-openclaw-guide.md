@@ -43,7 +43,7 @@ The OpenShell sandbox strips `NVIDIA_API_KEY` from the environment by design —
 
 | Requirement | Details |
 |---|---|
-| NemoClaw | `nemoclaw` and `openshell` CLIs installed (see [Install NemoClaw](#step-1-install-nemoclaw)). |
+| NemoClaw | `nemoclaw` and `openshell` CLIs installed (see [Install NemoClaw](#step-1--install-nemoclaw)). |
 | NVIDIA API key | `nvapi-...` key for NVIDIA NIM inference and embedding. Get one at [build.nvidia.com](https://build.nvidia.com). |
 | Python 3 | `python3` available on the host (Python 3.10–3.12 all work). |
 | `uv` | Installed automatically by `install.sh` if missing. |
@@ -69,8 +69,8 @@ This installs the `nemoclaw` and `openshell` CLIs and sets up the gateway binary
 Verify:
 
 ```bash
-nemoclaw --version # test against nemoclaw v0.0.55
-openshell --version # test against openshell 0.0.44
+nemoclaw --version    # e.g. nemoclaw v0.0.55
+openshell --version   # e.g. openshell 0.0.44
 ```
 
 ---
@@ -109,6 +109,8 @@ NVIDIA_API_KEY=nvapi-xxx
 NVIDIA_API_KEY=nvapi-xxx  # my key
 ```
 
+`install.sh` loads `.env` automatically. `haystack_rag_server.py` also reads `.env` from the demo directory via `python-dotenv`, so you do **not** need to `export NVIDIA_API_KEY` when starting the server manually.
+
 `NVIDIA_API_KEY` is cached to `~/.nemoclaw/credentials.json` after the first run so future re-runs pick it up automatically. You can also pass overrides inline:
 
 ```bash
@@ -123,28 +125,32 @@ INFERENCE_MODEL=nvidia/llama-3.3-70b bash install.sh
 bash install.sh
 ```
 
-The script runs the following steps automatically. You can also pass a sandbox name as an argument to skip the interactive selection prompt:
+Pass a sandbox name to skip the interactive selection prompt:
 
 ```bash
-bash install.sh <sandbox-name>
+bash install.sh my-assistant
 ```
 
 **What the installer does:**
 
-1. **Cleans up** any stale server processes from a previous run (by PID file `/tmp/haystack-rag.pid`).
+1. **Cleans up** stale RAG server processes (PID file `/tmp/haystack-rag.pid` and any leftover `haystack_rag_server` processes).
 2. **Loads `.env`** and resolves `NVIDIA_API_KEY`, inference provider, base URL, and model.
-3. **Installs OpenClaw** (if not already installed) via the official install script with `--no-onboard`. OpenClaw installs as an npm package via the Node.js runtime. If you use `nvm`, the binary lands in your active nvm version's bin directory (e.g., `~/.nvm/versions/node/vX.Y.Z/bin/openclaw`) rather than `~/.local/bin`. The installer locates the binary automatically after installation — you do not need to update PATH manually.
-4. **Configures OpenClaw** with your NVIDIA API key using `openclaw onboard --non-interactive`. This writes the key into `~/.openclaw/openclaw.json` under `.gateway.auth.token` and configures the NVIDIA NIM endpoint as the inference provider for the OpenClaw frontend chat interface.
-5. **Starts the OpenClaw gateway** as a background process. The WebUI token is extracted from `~/.openclaw/openclaw.json` at `.gateway.auth.token` and printed as a ready-to-use URL: `http://127.0.0.1:18789/#token=<token>`.
-6. **Installs host-side Python deps** into a `.venv` in the demo directory: `fastapi`, `uvicorn`, `haystack-ai`, `nvidia-haystack`, `pypdf`. These are used by the RAG server only — the sandbox skill does not need them.
-7. **Starts `haystack_rag_server.py`** as a background process (port 9004) with auto-restart on crash. The server is started with `NVIDIA_API_KEY` injected from the environment. Logs go to `/tmp/haystack-rag.log`. PID is tracked at `/tmp/haystack-rag.pid`.
-8. **Clears any active global network policy** (`openshell policy delete --global`) before running `nemoclaw onboard`. This is required because `nemoclaw onboard` applies its own network presets (npm, pypi, huggingface, etc.) as a per-sandbox policy during its step `[8/8]`, and that step fails with `"policy is managed globally"` if a gateway-global policy is already active.
-9. **Onboards a NemoClaw sandbox** fully non-interactively via `nemoclaw onboard --non-interactive`. Provider, model, and API key are passed via environment variables (`NEMOCLAW_NON_INTERACTIVE=1`, `NEMOCLAW_PROVIDER=custom`, `NEMOCLAW_ENDPOINT_URL`, `NEMOCLAW_MODEL`, `COMPATIBLE_API_KEY`). The sandbox defaults to the name `my-assistant`. If multiple sandboxes exist, the script prompts you to pick one.
-10. **Sets the inference provider** for the sandbox agent to NVIDIA NIM, always overriding whatever bootstrap model `nemoclaw onboard` chose.
-11. **Applies the sandbox network policy** (`policy/sandbox_policy.yaml`) as a per-sandbox (not global) policy after the sandbox is created. This opens port 9004 egress from the sandbox to the host, restricted to the skill venv's Python binary. `NVIDIA_API_KEY` is **never** passed into the sandbox. The policy file contains only `network_policies` — no `filesystem_policy` section — because modifying filesystem policy on a live sandbox is not permitted by the OpenShell runtime.
-11. **Uploads `haystack-rag-skills`** to `/sandbox/.openclaw-data/workspace/skills/haystack-rag-skills/`.
-12. **Bootstraps the skill venv** inside the sandbox with only `requests` — no Haystack packages needed in the sandbox since the skill is a pure HTTP client.
-13. **Verifies** the installation: server health, skill presence, and skill venv import.
+3. **Installs OpenClaw** (if missing) via the official install script with `--no-onboard`. The installer locates the binary automatically under nvm, `~/.local/bin`, or system paths.
+4. **Configures OpenClaw** on the host with `openclaw onboard --non-interactive` (NVIDIA API key + chat model for the host WebUI).
+5. **Starts the host OpenClaw gateway** as a background process and prints the WebUI URL with token.
+6. **Installs host-side Python deps** into `.venv`: `fastapi`, `uvicorn`, `python-dotenv`, `haystack-ai`, `nvidia-haystack`, `pypdf`.
+7. **Starts `haystack_rag_server.py`** on port 9004 as a background process with auto-restart. Frees port 9004 first if something is already listening. Logs: `/tmp/haystack-rag.log`. PID: `/tmp/haystack-rag.pid`.
+8. **Clears any global network policy** (`openshell policy delete --global`) so `nemoclaw onboard` can apply its own presets.
+9. **Onboards a NemoClaw sandbox** (if none exists) via `nemoclaw onboard --non-interactive`, then waits for it to become ready.
+10. **Sets the inference provider** for the sandbox agent to NVIDIA NIM (always overrides the bootstrap default).
+11. **Applies the sandbox network policy** (`policy/sandbox_policy.yaml`) to open port 9004 egress from the skill venv to the host. On a live sandbox that already has incompatible filesystem policy, this step warns instead of failing — see [Troubleshooting](#troubleshooting).
+12. **Installs `haystack-rag-skills`** via `nemoclaw <sandbox> skill install` (validates `SKILL.md`, uploads to the correct path, registers the skill). Falls back to `openshell sandbox upload` if needed.
+13. **Enables the skill in OpenClaw's registry** — sets `skills.entries.haystack-rag-skills.enabled=true` and `tools.profile=coding` in `/sandbox/.openclaw/openclaw.json` so the agent can `exec` the skill scripts.
+14. **Restarts the OpenClaw gateway inside the sandbox** so it re-reads the skill registry.
+15. **Bootstraps the skill venv** inside the sandbox with only `requests`.
+16. **Verifies** server health, skill presence, and venv import.
+
+> **After install:** Disconnect and reconnect the sandbox TUI so OpenClaw picks up the new skill (see [Step 5](#step-5--connect-and-try-it-out)).
 
 ---
 
@@ -164,11 +170,11 @@ Supported formats: `.pdf`, `.txt`, `.md` (searched recursively).
 
 ### Step 5 — Connect and Try It Out
 
-Connect to the sandbox:
+**Reconnect after install** (required for the agent to see the skill):
 
 ```bash
-# From your host terminal
-nemoclaw <sandbox-name> connect
+# Exit any existing sandbox session first, then:
+nemoclaw my-assistant connect
 ```
 
 Inside the sandbox, launch the OpenClaw TUI:
@@ -185,81 +191,48 @@ Verify the skill is loaded:
   Yes, I have the haystack-rag-skills skill available. It connects to a
   Haystack RAG server running on the host to index and search documents
   using NVIDIA NIM for embeddings and generation.
-
-  I can:
-  - Index documents from the host data directory
-  - Answer questions grounded in the indexed documents
-  - List what documents are currently indexed
-
-  What would you like to know?
 ```
+
+If the skill is missing, reinstall it and reconnect:
+
+```bash
+# From the host (not inside the sandbox)
+nemoclaw my-assistant skill install ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills
+```
+
+Then disconnect and run `nemoclaw my-assistant connect` again.
 
 ---
 
 **"Index my documents"**
 
-The agent will call `index` on the server, which embeds all files in `data/documents/` using `nvidia/nv-embedqa-e5-v5` and stores chunks in `data/store.json`.
+The agent calls `index` on the server, which embeds all files in `data/documents/` using `nvidia/nv-embedqa-e5-v5` and stores chunks in `data/store.json`.
 
 ```
 > Index my documents
 
-  Running index on the server...
-
   Indexed 28 new chunk(s) from 2 file(s).
   Total chunks in store: 28
-  Store: /home/user/haystack-rag-demo/data/store.json
 ```
 
 ---
 
-**"What documents are in the knowledge base?"**
+**"What documents are indexed?"**
 
 ```
 > What documents are indexed?
 
   Total chunks: 28
   Sources (2):
-    /home/user/haystack-rag-demo/data/documents/guide.pdf: 22 chunk(s)
-    /home/user/haystack-rag-demo/data/documents/notes.txt: 6 chunk(s)
+    .../data/documents/guide.pdf: 22 chunk(s)
+    .../data/documents/notes.txt: 6 chunk(s)
 ```
 
 ---
 
 **"What are the key recommendations in the guide?"**
 
-The agent retrieves the most relevant chunks and calls `nvidia/llama-3.3-nemotron-super-49b-v1.5` to generate a grounded answer.
-
-```
-> What are the key recommendations in the guide?
-
-  Based on guide.pdf, the key recommendations are:
-
-  1. **Start with a baseline pipeline** before adding complexity. The document
-     emphasizes composability — assemble only the components you need.
-
-  2. **Use NvidiaDocumentEmbedder for indexing** and NvidiaTextEmbedder for
-     queries to ensure vector-space consistency.
-
-  3. **Set split_overlap ≥ 15%** of split_length to avoid context loss at chunk
-     boundaries.
-
-  Source: guide.pdf
-```
-
----
-
-**"Ask my documents about authentication flows"**
-
-```
-> Ask my documents about authentication flows
-
-  The documents do not contain information about authentication flows.
-  Only guide.pdf and notes.txt are indexed — neither covers authentication.
-  If you have a relevant document, add it to the data directory and
-  ask me to index again.
-```
-
-The RAG server answers honestly when the indexed documents don't cover a topic.
+The agent retrieves relevant chunks and generates a grounded answer via `nvidia/llama-3.3-nemotron-super-49b-v1.5`.
 
 ---
 
@@ -272,23 +245,21 @@ If you're on a remote machine (e.g., a Brev instance), forward the gateway port 
 brev port-forward <your-instance-name> -p 18789:18789
 ```
 
-Then open the WebUI in your local browser using the URL printed by `install.sh`:
+Then open the WebUI URL printed by `install.sh`:
 
 ```
 http://127.0.0.1:18789/#token=<token>
 ```
 
-The token is stored at `.gateway.auth.token` inside `~/.openclaw/openclaw.json`. To retrieve it manually:
+Retrieve the token manually:
 
 ```bash
 python3 -c "import json; d=json.load(open('$HOME/.openclaw/openclaw.json')); print(d['gateway']['auth']['token'])"
 ```
 
-**Default chat model:** `nvidia/llama-3.3-nemotron-super-49b-v1.5`
+**For vision/image input:** Set `OPENCLAW_MODEL=nvidia/moonshotai/kimi-k2.6` in `.env` before running `install.sh`.
 
-**For vision/image input:** Switch to `nvidia/moonshotai/kimi-k2.6` by setting `OPENCLAW_MODEL=nvidia/moonshotai/kimi-k2.6` in `.env` before running `install.sh`.
-
-If the WebUI shows a permission error, list and approve the pending device:
+If the WebUI shows a permission error:
 
 ```bash
 openclaw devices list
@@ -299,14 +270,20 @@ openclaw devices approve <hash-shown-as-pending>
 
 ## How the Skill Works
 
-The `haystack-rag-skills` client (`scripts/haystack_client.py`) is a pure HTTP client. OpenClaw invokes it via the skill's venv Python, which is the only binary the sandbox policy permits to open a connection to port 9004:
+The `haystack-rag-skills` client (`scripts/haystack_client.py`) is a pure HTTP client. OpenClaw invokes it via the skill's venv Python — the only binary the sandbox policy permits to reach port 9004:
 
 ```bash
 SKILL_DIR=~/.openclaw/workspace/skills/haystack-rag-skills
 $SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py <command> [args]
 ```
 
-> **Note:** Inside the sandbox, `~/.openclaw` is a symlink to `~/.openclaw-data`. The skill is physically at `/sandbox/.openclaw-data/workspace/skills/haystack-rag-skills/`. The network policy lists both path forms so egress is permitted from either resolved path.
+**Skill location:** On current NemoClaw sandboxes (OpenClaw 2026.5+), skills live at:
+
+```
+/sandbox/.openclaw/workspace/skills/haystack-rag-skills/
+```
+
+Legacy sandboxes may use `/sandbox/.openclaw-data/workspace/skills/`. `nemoclaw skill install` picks the correct path automatically. Do **not** rely on a raw `openshell sandbox upload` to `.openclaw-data` — OpenClaw will not discover the skill unless it is registered in `openclaw.json`.
 
 **Command reference:**
 
@@ -314,16 +291,13 @@ $SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py <command> [arg
 # Index all files in the server's default data directory
 python3 haystack_client.py index
 
-# Index from a specific host path (pass as an override)
-python3 haystack_client.py index --data-dir /absolute/host/path
-
 # Ask a question (top-k chunks retrieved)
 python3 haystack_client.py query --question "What is the main topic?" --top-k 8
 
 # List all indexed sources
 python3 haystack_client.py list-documents
 
-# Use a custom server URL (default: http://host.openshell.internal:9004)
+# Custom server URL (default: http://host.openshell.internal:9004)
 python3 haystack_client.py --server-url http://127.0.0.1:9004 query --question "..."
 ```
 
@@ -337,13 +311,13 @@ Access is governed by two independent controls.
 
 ### Control 1 — Server API surface (`haystack_rag_server.py`)
 
-The host server runs with full access to `NVIDIA_API_KEY`, the filesystem, and the NVIDIA API. Only four HTTP endpoints are reachable from the network — `NVIDIA_API_KEY` and internal pipeline state are never exposed:
+The host server runs with full access to `NVIDIA_API_KEY`, the filesystem, and the NVIDIA API. Only four HTTP endpoints are reachable from the network:
 
 ```python
-@app.get("/health")   # liveness — no key required
-@app.post("/index")   # triggers embedding + store update
-@app.post("/query")   # triggers retrieval + generation
-@app.get("/documents") # lists indexed sources
+@app.get("/health")    # liveness — no key required
+@app.post("/index")    # triggers embedding + store update
+@app.post("/query")     # triggers retrieval + generation
+@app.get("/documents")  # lists indexed sources
 ```
 
 ### Control 2 — `sandbox_policy.yaml` (network-level)
@@ -356,17 +330,48 @@ network_policies:
     endpoints:
       - host: host.openshell.internal
         port: 9004
-        allowed_ips: [172.17.0.1]
-      - host: 127.0.0.1
-        port: 9004
     binaries:
-      - { path: /usr/bin/python3 }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
       # ... (full list in policy/sandbox_policy.yaml)
 ```
 
-The `nvidia` policy block (which would allow direct NVIDIA API calls) deliberately **does not** include the skill venv python binaries — skills cannot call NVIDIA directly even if they tried.
+The `nvidia` policy block deliberately **does not** include the skill venv python binaries — skills cannot call NVIDIA directly even if they tried.
+
+---
+
+## Manual Operations
+
+### Run the RAG server manually (without full reinstall)
+
+The server loads `NVIDIA_API_KEY` from `.env` automatically:
+
+```bash
+cd nemoclaw-demos/haystack-rag-demo
+source .venv/bin/activate
+
+# Free port 9004 if a previous instance is still running
+kill $(lsof -t -i:9004) 2>/dev/null || true
+
+python haystack_rag_server.py
+```
+
+### Restart via installer (recommended)
+
+Restarts the server, reapplies policy, reinstalls the skill, and refreshes the skill venv:
+
+```bash
+kill $(cat /tmp/haystack-rag.pid) 2>/dev/null || true
+bash install.sh my-assistant
+```
+
+### Reinstall only the skill
+
+```bash
+nemoclaw my-assistant skill install ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills
+```
+
+Then disconnect and reconnect the sandbox TUI.
 
 ---
 
@@ -374,58 +379,45 @@ The `nvidia` policy block (which would allow direct NVIDIA API calls) deliberate
 
 | Issue | Fix |
 |---|---|
-| `NVIDIA_API_KEY is not set` (fatal at step 2) | Add `NVIDIA_API_KEY=nvapi-...` to `.env` with no inline comment after the value, or `export NVIDIA_API_KEY=...` before running `install.sh`. |
-| `openclaw: command not found` after install | OpenClaw installs via npm into your active Node.js bin dir. If you use nvm this is `~/.nvm/versions/node/vX.Y.Z/bin/`. `install.sh` finds it automatically; for manual use run: `export PATH="$(dirname $(find ~/.nvm -name openclaw -type f 2>/dev/null \| head -1)):$PATH"` |
-| `openclaw onboard` fails with auth error | Confirm `NVIDIA_API_KEY` is a valid `nvapi-...` key. Check: `curl -s -H "Authorization: Bearer $NVIDIA_API_KEY" https://integrate.api.nvidia.com/v1/models \| head -1` |
-| WebUI token not found | The token lives at `.gateway.auth.token` inside `~/.openclaw/openclaw.json`, not at the top level. Retrieve it with: `python3 -c "import json; d=json.load(open('$HOME/.openclaw/openclaw.json')); print(d['gateway']['auth']['token'])"` |
-| WebUI shows permission error | Approve the pending device: `openclaw devices list` then `openclaw devices approve <hash>` |
-| RAG server not responding on port 9004 | Check logs: `tail -50 /tmp/haystack-rag.log`. Restart: `kill $(cat /tmp/haystack-rag.pid) && bash install.sh <sandbox-name>` |
-| `NVIDIA_API_KEY is not set on the host` (server 500) | The server process was started without the key. Re-run `install.sh` — it exports the key when starting the server. Do not start the server manually without `export NVIDIA_API_KEY=...`. |
-| `Connection refused` / `cannot connect to ... port 9004` | Server is not running, or the sandbox policy was not applied. Verify: `curl http://127.0.0.1:9004/health` from the host. Re-run `install.sh`. |
-| `l7_decision=deny` / 403 in OpenShell logs | Policy not applied, or the binary path isn't listed. Re-run: `openshell policy set <sandbox-name> --policy policy/sandbox_policy.yaml --wait` |
-| `"filesystem policy cannot be removed on a live sandbox"` or `"filesystem read_write path ... cannot be removed"` from `openshell policy set` | The submitted policy was trying to add or remove a `filesystem_policy` section on a running sandbox, which is forbidden. The correct policy file (`sandbox_policy.yaml`) contains only `network_policies`. If your policy file has a `filesystem_policy` block, remove it entirely. If the sandbox was built with an old policy that included one, delete the sandbox and re-run `install.sh` (see [Full environment reset](#full-environment-reset)). |
-| `"policy is managed globally; delete global policy before sandbox policy update"` | A gateway-global policy is active. `nemoclaw onboard`'s step `[8/8]` and any per-sandbox `openshell policy set` call will fail. Clear it first: `openshell policy delete --global --yes`. `install.sh` does this automatically, but if you ran `openshell policy set --global` manually you must clear it yourself. After clearing, re-run `install.sh`. |
-| `ModuleNotFoundError: requests` (in sandbox) | Skill venv is missing. Recreate it inside the sandbox: `openshell sandbox exec -n <sandbox-name> -- python3 -m venv /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills/venv && openshell sandbox exec -n <sandbox-name> -- /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills/venv/bin/pip install -q requests` |
-| `No documents indexed` at query time | Run `index` first, and confirm `.txt`/`.md`/`.pdf` files exist in `data/documents/` on the host. |
-| Agent doesn't find the skill | Disconnect and reconnect to the sandbox. Verify the skill exists: `openshell sandbox exec -n <sandbox-name> -- test -f /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills/SKILL.md && echo ok` |
-| Wrong inference model in TUI | `nemoclaw onboard` sets its own default. `install.sh` always overrides it with your `.env` model after the gateway is live. To fix manually: `openshell inference set --provider nvidia --model nvidia/llama-3.3-nemotron-super-49b-v1.5` then reconnect. |
-| Re-indexing adds duplicate chunks | The indexing pipeline uses `DuplicatePolicy.SKIP` — re-indexing the same files is safe. The chunk count won't grow. To force a full re-index, delete `data/store.json` and run `index` again. |
-
-### Restart the RAG server without full reinstall
-
-```bash
-kill $(cat /tmp/haystack-rag.pid) 2>/dev/null || true
-bash install.sh <sandbox-name>
-```
+| `NVIDIA_API_KEY is not set` at install time | Add `NVIDIA_API_KEY=nvapi-...` to `.env` (no inline comment after the value). |
+| `NVIDIA_API_KEY is not set` when querying (server 500) | Confirm `.env` has the key and restart the server. The server reads `.env` via `python-dotenv`; re-run `install.sh` or start manually from the demo directory. |
+| `[Errno 98] address already in use` on port 9004 | Kill the stale process: `kill $(lsof -t -i:9004)` then restart. `install.sh` does this automatically. |
+| Agent doesn't find `haystack-rag-skills` | Reinstall: `nemoclaw <sandbox> skill install haystack-rag-skills/`. Disconnect and reconnect the TUI. Verify: `openshell sandbox exec -n <sandbox> -- test -f /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md && echo ok` |
+| Skill uploaded but not in agent's skill list | OpenClaw 2026.5+ requires registry entry. Re-run `install.sh` (enables `skills.entries.haystack-rag-skills` in `openclaw.json`) or run `nemoclaw skill install`. |
+| RAG server not responding | Check logs: `tail -50 /tmp/haystack-rag.log`. Health check: `curl http://127.0.0.1:9004/health` |
+| `Connection refused` / port 9004 from sandbox | Server not running, or sandbox policy not applied. Re-run `install.sh`. If policy failed on a live sandbox, see [Full environment reset](#full-environment-reset). |
+| `l7_decision=deny` / 403 in OpenShell logs | Policy not applied or binary path not listed. Re-run: `openshell policy set <sandbox> --policy policy/sandbox_policy.yaml --wait` |
+| `"filesystem policy cannot be removed on a live sandbox"` | Policy step failed on an existing sandbox. Skill install still works, but port 9004 egress may be blocked. Delete and recreate the sandbox (see reset below). |
+| `"policy is managed globally"` | Run `openshell policy delete --global --yes`, then re-run `install.sh`. The installer clears this automatically before onboard. |
+| `ModuleNotFoundError: requests` in sandbox | Re-run `install.sh` to recreate the skill venv, or manually: `openshell sandbox exec -n <sandbox> -- python3 -m venv /sandbox/.openclaw/workspace/skills/haystack-rag-skills/venv && .../venv/bin/pip install -q requests` |
+| `No documents indexed` at query time | Run `index` first; confirm files exist in `data/documents/` on the host. |
+| Wrong inference model in TUI | `openshell inference set --provider nvidia --model nvidia/llama-3.3-nemotron-super-49b-v1.5` then reconnect. |
+| `openclaw: command not found` | If using nvm: `export PATH="$(dirname $(find ~/.nvm -name openclaw -type f 2>/dev/null \| head -1)):$PATH"` |
+| WebUI token not found | Token is at `.gateway.auth.token` in `~/.openclaw/openclaw.json` (see Step 3 / WebUI section). |
 
 ### Full environment reset
 
-Use this when you hit an unrecoverable policy error, a partially-created sandbox from a failed install, or just want a clean slate.
+Use when policy errors are unrecoverable, a sandbox was partially created, or you want a clean slate.
 
 ```bash
-# 1. Stop the RAG server
-kill $(cat /tmp/haystack-rag.pid) 2>/dev/null || true
+cd nemoclaw-demos/haystack-rag-demo
 
-# 2. Clear any active global network policy
-#    Required before sandbox deletion and before the next nemoclaw onboard.
-#    A stale global policy causes "policy is managed globally" errors.
+# Stop the RAG server
+kill $(cat /tmp/haystack-rag.pid) 2>/dev/null || true
+kill $(lsof -t -i:9004) 2>/dev/null || true
+
+# Clear global policy (required before sandbox delete / re-onboard)
 openshell policy delete --global --yes 2>/dev/null || true
 
-# 3. Delete the sandbox (replace my-assistant with your sandbox name)
+# Delete the sandbox
 openshell sandbox delete my-assistant
 
-# 4. Remove host venv and stored document index
+# Remove host venv and stored index
 rm -rf .venv data/store.json
 
-# 5. Re-run from scratch
+# Re-run from scratch
 bash install.sh
 ```
-
-> **When to run a full reset:**
-> - `install.sh` failed mid-run and left a partially-configured sandbox
-> - You see `"filesystem policy cannot be removed on a live sandbox"` — the sandbox was built with an incompatible policy
-> - You see `"policy is managed globally"` and `openshell policy delete --global` was not enough to unblock it
-> - You want to switch to a different sandbox name or model
 
 ---
 
@@ -433,93 +425,41 @@ bash install.sh
 
 ```
 haystack-rag-demo/
-├── install.sh                          # One-command installer (Steps 1–12)
+├── install.sh                          # One-command installer
 ├── haystack_rag_server.py              # Host-side FastAPI RAG server (port 9004)
 ├── .env.template                       # Configuration template — copy to .env
 ├── .env                                # Your local config (not committed)
 ├── haystack-rag-openclaw-guide.md      # This guide
 ├── data/
 │   ├── documents/                      # ← drop your .txt / .md / .pdf files here
-│   └── store.json                      # Auto-created on first 'index' run
+│   └── store.json                      # Auto-created on first index run
 ├── policy/
 │   └── sandbox_policy.yaml             # Network policy — haystack_rag_host on port 9004
 └── haystack-rag-skills/
-    ├── SKILL.md                        # OpenClaw skill definition and usage examples
+    ├── SKILL.md                        # OpenClaw skill definition
     └── scripts/
         └── haystack_client.py          # HTTP client — calls /index, /query, /documents
 ```
 
 ---
 
-## Notes on Tested Environment
+## Implementation Notes
 
-The following issues were identified and fixed during development of this demo. They are all resolved in the current code, but are documented here so you understand the design decisions and can diagnose similar issues if you adapt the scripts.
+These design decisions are baked into the current scripts. Documented here for anyone adapting the demo.
 
----
+**OpenClaw PATH after npm install.** On nvm systems, `openclaw` lands in the active node's bin dir, not `~/.local/bin`. `install.sh` uses `_ensure_openclaw_path()` to find it automatically.
 
-### OpenClaw PATH after npm install
+**Gateway token location.** The WebUI token is at `.gateway.auth.token` inside `~/.openclaw/openclaw.json`, not the JSON root.
 
-On systems with `nvm`, `openclaw` installs into the active nvm node's bin directory (e.g., `~/.nvm/versions/node/v22.22.3/bin/`), not `~/.local/bin`. A naive `export PATH="$HOME/.local/bin:$PATH"` after install fails silently. The `install.sh` `_ensure_openclaw_path()` function uses `find` to locate the binary under `~/.nvm`, `~/.local/bin`, `~/.cargo/bin`, and standard system paths, then prepends the correct directory to `PATH`.
+**`NvidiaChatGenerator` parameter name.** Embedders use `api_url=`; the chat generator uses `api_base_url=`. Mixing these up causes silent 500 errors at query time.
 
----
+**Restart loop under `set -e`.** Background server loops append `|| true` to the Python invocation so a crash triggers restart instead of killing the subshell.
 
-### Gateway token nested under `.gateway.auth.token`
+**Skill deployment path.** Raw `openshell sandbox upload` to `.openclaw-data/workspace/skills/` is insufficient on OpenClaw 2026.5+. Use `nemoclaw <sandbox> skill install`, enable the skill in `openclaw.json`, and restart the sandbox OpenClaw gateway. This matches the pattern used in `google-workspace-demo` and `outlook-pst-demo`.
 
-The OpenClaw gateway auth token lives at `.gateway.auth.token` inside `~/.openclaw/openclaw.json`, not at the JSON root. Grep-based extraction (`grep -o '"token":"[^"]*"'`) finds nothing because the top-level keys are different. The installer uses a Python one-liner to parse the JSON properly:
+**Policy on live sandboxes.** `sandbox_policy.yaml` contains only `network_policies` (no `filesystem_policy`). Network-only updates work on fresh sandboxes. If a live sandbox rejects the policy update, recreate it via the reset procedure above.
 
-```bash
-python3 -c "
-import json
-d = json.load(open('$HOME/.openclaw/openclaw.json'))
-print(d.get('gateway', {}).get('auth', {}).get('token', ''))
-"
-```
-
----
-
-### `NvidiaChatGenerator` uses `api_base_url=`, not `api_url=`
-
-The Haystack NVIDIA integration has an inconsistency: `NvidiaTextEmbedder` and `NvidiaDocumentEmbedder` take `api_url=` as the endpoint parameter, but `NvidiaChatGenerator` takes `api_base_url=`. If you copy initialization code from an embedder to the generator, the wrong parameter is silently ignored and every query returns a 500 error at request time with no helpful message at import time. `haystack_rag_server.py` uses `api_base_url=` for the generator.
-
----
-
-### Restart loop exits under `set -euo pipefail`
-
-With `set -euo pipefail` active (which `install.sh` uses), any non-zero exit code inside a subshell causes the subshell to terminate. This means a crashing Python server inside a `while true` restart loop kills the loop rather than restarting the server. All background server loops in `install.sh` append `|| true` to the Python invocation so a server crash is treated as a recoverable event.
-
----
-
-### `filesystem policy cannot be removed on a live sandbox`
-
-**Error:** `openshell policy set` returns `"filesystem read_write path '/sandbox/.openclaw' cannot be removed on a live sandbox"` or `"filesystem policy cannot be removed on a live sandbox"`.
-
-**Cause:** Submitting a policy that either (a) includes a `filesystem_policy` section that conflicts with what was set at sandbox build time, or (b) omits `filesystem_policy` entirely (which the runtime interprets as "remove the existing filesystem policy"). Neither is permitted on a running sandbox container.
-
-**Fix:** The `sandbox_policy.yaml` in this demo contains only `network_policies` — no `filesystem_policy` block. Network-only policies can be applied to live sandboxes without restriction. If you ever need filesystem policy changes, they must be baked in at sandbox build time (i.e., before `nemoclaw onboard` runs), not patched afterward. If you encounter this error on an existing sandbox, perform a [full environment reset](#full-environment-reset) to delete and recreate it.
-
----
-
-### `policy is managed globally; delete global policy before sandbox policy update`
-
-**Error:** `nemoclaw onboard` fails at step `[8/8]` with `"policy is managed globally; delete global policy before sandbox policy update"`. Per-sandbox `openshell policy set` calls also fail with the same message.
-
-**Cause:** A gateway-global policy (set with `openshell policy set --global`) was active when `nemoclaw onboard` tried to apply its network presets (npm, pypi, huggingface, etc.) to the newly created sandbox. The runtime enforces that sandbox-level policy updates are not permitted while a global policy is managing the gateway.
-
-**Fix:** Delete the global policy before running `nemoclaw onboard` or any per-sandbox `openshell policy set`:
-
-```bash
-openshell policy delete --global --yes
-```
-
-`install.sh` does this automatically at the start of step 8 (`|| true` so it's a no-op when no global policy exists). Our earlier approach of applying the policy globally before onboard was reversed precisely because of this conflict.
-
-**Cleanup if you hit this mid-run** (sandbox partially created, global policy still active):
-
-```bash
-openshell policy delete --global --yes
-openshell sandbox delete <sandbox-name>
-bash install.sh
-```
+**Global policy conflict.** `nemoclaw onboard` step `[8/8]` fails if a gateway-global policy is active. `install.sh` clears it with `openshell policy delete --global` before onboard.
 
 ---
 

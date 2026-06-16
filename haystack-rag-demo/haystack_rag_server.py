@@ -23,6 +23,11 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+load_dotenv(_SCRIPT_DIR / ".env")
+
 # ── FastAPI ──────────────────────────────────────────────────────────────────
 try:
     from fastapi import FastAPI, HTTPException
@@ -71,7 +76,7 @@ def _require_api_key() -> str:
     if not key:
         raise HTTPException(
             status_code=500,
-            detail="NVIDIA_API_KEY is not set on the host. Export it before starting the server.",
+            detail="NVIDIA_API_KEY is not set. Add it to .env or export it before starting the server.",
         )
     return key
 
@@ -317,7 +322,7 @@ def main() -> None:
     if not api_key:
         print(
             "WARNING: NVIDIA_API_KEY is not set. "
-            "Index and query requests will fail until the key is exported.",
+            "Add it to .env or export it — index and query requests will fail until then.",
             flush=True,
         )
 
