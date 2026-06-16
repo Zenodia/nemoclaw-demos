@@ -38,6 +38,22 @@ sandbox skill venv  ──►  host:4300 (n8n_mcp_server.py wrapper)  ──► 
 
 No GPU. No local RAG stack. No browser upload portal.
 
+
+It is mandatory to install a specific version of NEMOCLAW : 
+```bash
+bash
+export NEMOCLAW_AGENT=openclaw
+export NEMOCLAW_INSTALL_TAG=v0.0.36
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+```
+verify the version of nemoclaw and openshell after installation:
+
+```bash 
+nemoclaw --version  
+# you should see nemoclaw v0.0.36
+openshell --version 
+# openshell 0.0.36
+```
 ---
 
 ## 2. Environment Setup
@@ -54,8 +70,8 @@ N8N_MCP_TOKEN=<your-n8n-api-key>
 
 # --- Inference (OpenShell gateway provider + nemoclaw onboard) ---
 INFERENCE_API_KEY=nvapi-...
-INFERENCE_BASE_URL=https://inference-api.nvidia.com/v1
-INFERENCE_MODEL=aws/anthropic/bedrock-claude-sonnet-4-6
+INFERENCE_BASE_URL=https://integrate.api.nvidia.com/v1
+INFERENCE_MODEL=nvidia/nemotron-3-ultra-550b-a55b
 
 # Optional — defaults to nvidia/nvidia
 # INFERENCE_PROVIDER_TYPE=nvidia
