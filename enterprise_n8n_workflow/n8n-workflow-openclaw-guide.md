@@ -69,9 +69,12 @@ N8N_MCP_TOKEN=<your-n8n-api-key>
 # N8N_INSTANCE_URL=https://n8n.prd.astra.nvidia.com/mcp-server/http
 
 # --- Inference (OpenShell gateway provider + nemoclaw onboard) ---
-INFERENCE_API_KEY=nvapi-...
+INFERENCE_API_KEY=nvapi-...          # YOUR key — get one at build.nvidia.com
 INFERENCE_BASE_URL=https://integrate.api.nvidia.com/v1
 INFERENCE_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+
+# Optional — model for the n8n orchestrator LLM node (fix_n8n_setup.sh reads this)
+# OPENCLAW_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5
 
 # Optional — defaults to nvidia/nvidia
 # INFERENCE_PROVIDER_TYPE=nvidia
@@ -85,6 +88,12 @@ All five core variables are required. `install.sh` fails fast if any are missing
 > `N8N_MCP_TOKEN` is an n8n API key you create in that instance (Settings → API).
 
 > **`INFERENCE_API_KEY` / `INFERENCE_BASE_URL` / `INFERENCE_MODEL`** drive `nemoclaw onboard` non-interactively (no clicking through provider/model pickers). The script picks the `custom` (OpenAI-compatible) provider, points it at `INFERENCE_BASE_URL`, and passes `INFERENCE_API_KEY` as `COMPATIBLE_API_KEY`. The OpenShell gateway provider is then created (or updated) with `--credential INFERENCE_API_KEY` and `--config NVIDIA_BASE_URL=$INFERENCE_BASE_URL`, and `openclaw.json` inside the sandbox is patched to make `inference/$INFERENCE_MODEL` the agent's primary model.
+
+> ⚠️ **Same key, two configs.** `INFERENCE_API_KEY` powers the **sandbox OpenClaw
+> agent** only. The **EnterpriseOrchestrator** n8n workflow needs its **own**
+> `NVIDIAInferenceAPI` credential inside n8n (same `nvapi-…` value is fine). See
+> [Section 3 step 3b](#3-bring-up-the-self-hosted-n8n-first) or run
+> `n8n_selfhost/fix_n8n_setup.sh` after import.
 
 > **`N8N_INSTANCE_URL` / `N8N_MCP_TOKEN`** are read by `n8n_mcp_server.py` (the host wrapper) — never sent to the sandbox.
 
@@ -106,30 +115,30 @@ cd n8n_selfhost
 bash 0_build_and_run_docker.sh
 
 # 2. Import the EnterpriseOrchestrator + 3 sub-workflows
-#    ⚠ Import always deactivates workflows — publish them AFTER import (step 3).
+#    ⚠ Import always deactivates workflows — fix_n8n_setup.sh publishes them (step 3).
 docker cp workflows-export.json n8n:/home/node/.n8n/
 docker exec n8n n8n import:workflow --input=/home/node/.n8n/workflows-export.json
 
-# 3. Publish all 4 workflows, THEN restart
-#    (n8n 2.22+: use publish:workflow — update:workflow is deprecated)
-#    Full walkthrough — credentials, model, activation, verify:
-#    see n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md
-for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
-  docker exec n8n n8n publish:workflow --id=$id
-done
-docker restart n8n
-# Confirm all 4 register at boot:
-docker logs n8n --since 30s 2>&1 | grep -A5 'Start Active Workflows'
+# 3. Wire YOUR nvapi key into n8n, set orchestrator model, publish, restart, verify
+#    (reads INFERENCE_API_KEY + INFERENCE_BASE_URL from ../.env)
+#    Manual walkthrough: preserving_n8n_workflow_for_reuse_steps.md
+bash fix_n8n_setup.sh
 
 # 4. Sign in at http://localhost:5678 and create an n8n API key
 #    (Settings → n8n API) → put it in .env as N8N_MCP_TOKEN.
 #    See "Sign in to n8n" below if you don't know the email/password.
 
-# 5. Confirm n8n + webhook are live
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5678/webhook/agent-hub \
+# 5. Quick re-check (step 3 already verified; optional)
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 300 \
+  -X POST http://localhost:5678/webhook/agent-hub \
   -H "Content-Type: application/json" -d '{"chatInput":"ping"}'   # 200 = ready
 cd ..
 ```
+
+> **Step 3 is required for every new user.** A fresh import has **no**
+> credentials. Without `fix_n8n_setup.sh` (or manual credential creation in the
+> UI), the webhook returns `{"message":"Error in workflow"}` (HTTP 500). You can
+> re-run `fix_n8n_setup.sh` any time — it is idempotent.
 
 ### Sign in to n8n (owner account)
 
@@ -166,7 +175,7 @@ python3 -c "import sqlite3; c=sqlite3.connect('/tmp/n8n-db.sqlite'); print(list(
 docker stop n8n && docker rm n8n
 docker volume rm n8n_data
 bash 0_build_and_run_docker.sh
-# then repeat steps 2–5 above
+# then repeat steps 2–5 above (import → fix_n8n_setup.sh → API key → verify)
 ```
 
 > Full detail (bring-your-own-key, model field, activation order, troubleshooting)
@@ -213,7 +222,7 @@ bash install.sh [sandbox-name]
 | 2 | Load `.env`, validate all 5 required keys | fails fast if any missing |
 | 3 | Host venv at `.venv` + `pip install -r requirements.txt` | reuses existing `.venv` |
 | 4 | Detect sandbox; if none, run `nemoclaw onboard --non-interactive` with `NEMOCLAW_PROVIDER=custom`, `NEMOCLAW_ENDPOINT_URL=$INFERENCE_BASE_URL`, `NEMOCLAW_MODEL=$INFERENCE_MODEL`, `COMPATIBLE_API_KEY=$INFERENCE_API_KEY` | skipped if sandbox exists |
-| 4b | `openshell provider create/update` + `openshell inference set` | provider update/create idempotent |
+| 4b | `openshell provider create/update` + `openshell inference set --no-verify` | provider update/create idempotent; `--no-verify` skips slow gateway probe for large models |
 | 4c | Patch `/sandbox/.openclaw/openclaw.json` inside sandbox → set `inference/$INFERENCE_MODEL` as primary | always re-applied |
 | 5 | Start `n8n_mcp_server.py` on `127.0.0.1:4300/mcp` (background, auto-restart, logs `/tmp/n8n-mcp.log`). **Requires the n8n instance from [Section 3](#3-bring-up-the-self-hosted-n8n-first) to be reachable at `N8N_INSTANCE_URL`.** | skipped if port responding |
 | 6 | Apply `policy/sandbox_policy.yaml` (skill venv → port 4300) | always re-applied |
@@ -472,7 +481,7 @@ n8n engine  (self-hosted ./n8n_selfhost on :5678, or a remote enterprise n8n)
 
 | File | Purpose |
 |---|---|
-| `n8n_selfhost/` | Bundled self-hosted n8n: build script, workflow export, sanitized cred template + redeploy guide (start this first — [Section 3](#3-bring-up-the-self-hosted-n8n-first)) |
+| `n8n_selfhost/` | Bundled self-hosted n8n: build script, workflow export, `fix_n8n_setup.sh`, redeploy guide ([Section 3](#3-bring-up-the-self-hosted-n8n-first)) |
 | `install.sh` | One-command installer (10 steps, idempotent) |
 | `n8n_mcp_server.py` | Host FastMCP wrapper (port 4300) — 3 meta-tools + `execute_chat_workflow` (webhook POST) |
 | `n8n_mcp_client.py` | Standalone host-side interactive CLI (workflow picker → query → wait) |
@@ -511,7 +520,7 @@ The UI login is the **owner account** stored in the `n8n_data` Docker volume, no
 [Sign in to n8n](#sign-in-to-n8n-owner-account) — run `user-management:reset` to
 create a fresh owner, or query the DB for the current email.
 
-**Self-hosted n8n — webhook returns `404` (`unknown webhook "POST agent-hub"`)**
+**Self-hosted n8n — webhook returns `404` (`Cannot POST /webhook/agent-hub`)**
 
 The orchestrator webhook is only registered when **EnterpriseOrchestrator** is
 **published and active**. Common causes:
@@ -520,16 +529,49 @@ The orchestrator webhook is only registered when **EnterpriseOrchestrator** is
    import first, then publish, then restart.
 2. **Restart without publish** — after import, run `publish:workflow` on all four
    IDs before `docker restart n8n`.
+3. **Tested too soon after restart** — webhooks take ~15s to register. Wait before
+   curling.
+4. **UI Save without Publish** (n8n 2.22+) — editing in the canvas creates a
+   **draft**; production webhooks use the **published** version.
 
 ```bash
 for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
   docker exec n8n n8n publish:workflow --id=$id
 done
 docker restart n8n
+sleep 15
 docker logs n8n --since 30s 2>&1 | grep 'Activated workflow'   # expect 4 lines
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5678/webhook/agent-hub \
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 300 \
+  -X POST http://localhost:5678/webhook/agent-hub \
   -H "Content-Type: application/json" -d '{"chatInput":"ping"}'   # 200 = ready
 ```
+
+**Self-hosted n8n — webhook returns `{"message":"Error in workflow"}` (HTTP 500)**
+
+The webhook is registered but execution failed. On a fresh deploy this is almost
+always a **missing credential** — the workflow references `NVIDIAInferenceAPI` but
+no credential exists until you create one. `.env`'s `INFERENCE_API_KEY` does **not**
+flow into n8n automatically.
+
+```bash
+cd n8n_selfhost && bash fix_n8n_setup.sh   # reads your nvapi key from ../.env
+```
+
+Or manually: **EnterpriseOrchestrator** → **OpenAI Chat Model** → create credential
+with your `nvapi-…` + Base URL `https://integrate.api.nvidia.com/v1` → set model
+(e.g. `nvidia/llama-3.3-nemotron-super-49b-v1.5`) → **Publish**.
+
+Check the exact failing node: n8n UI → **Executions** → latest failed run, or:
+
+```bash
+docker exec n8n cat /home/node/.n8n/n8nEventLog.log | tail -20
+# look for "Error in sub-node OpenAI Chat Model"
+```
+
+**Self-hosted n8n — webhook is slow (1–3 minutes)**
+
+Normal. Each call runs the AI agent plus three guardrail sub-workflow tool calls.
+Use `--max-time 300` on curl. The MCP wrapper timeout is 600s.
 
 **Skill returns "Name or service not known" pointing at `n8n.prd.astra.nvidia.com`** *(remote-n8n only — N/A when using the bundled self-host on `localhost:5678`)*
 
@@ -592,33 +634,114 @@ echo "$OPENCLAW_GATEWAY_TOKEN"
 
 Populate the `.env` per [Section 2](#2-environment-setup). All five core keys (`N8N_INSTANCE_URL`, `N8N_MCP_TOKEN`, `INFERENCE_API_KEY`, `INFERENCE_BASE_URL`, `INFERENCE_MODEL`) are required.
 
-**Step 4 sandbox build fails inside OpenClaw patch RUN (`rcf_patch.py` / `Patch 1–5`)**
+**Step 4 / sandbox build — OpenClaw version incompatibility (`rcf_patch.py` / Patch 1–5)**
 
-`nemoclaw v0.0.36` patches `replaceConfigFile` and friends inside OpenClaw's compiled JS dist. OpenClaw 2026.5.22+ refactored those functions — the regex anchors no longer match, the Docker build aborts with messages like:
+NemoClaw `v0.0.36` (openshell `0.0.36`) patches OpenClaw's compiled JS dist during the
+sandbox Docker build. The NemoClaw blueprint declares:
+
+```yaml
+# ~/.nemoclaw/source/nemoclaw-blueprint/blueprint.yaml
+min_openclaw_version: "2026.4.24"
+```
+
+On a machine where the sandbox build **succeeds**, the `sandbox-base` image typically
+ships OpenClaw **≤ 2026.4.24** (or Docker layer cache hides step 18 from a prior build).
+On a machine that **pulls a fresh** `ghcr.io/nvidia/nemoclaw/sandbox-base`, the bundled
+OpenClaw is often **≥ 2026.5.22**, which refactored `replaceConfigFile` and related
+internals. The patch regex anchors in stock NemoClaw no longer match, and the Docker
+build aborts at Dockerfile step 18/62:
 
 ```
 AssertionError: tryWriteSingleTopLevelIncludeMutation/writeConfigFile pattern not found in replaceConfigFile
 returned a non-zero code: 1
 ```
 
-This is an upstream NemoClaw vs OpenClaw version drift, not a bug in this demo. **Local workaround** (applied outside this repo, on the NemoClaw source checkout at `~/NemoClaw/`):
+`install.sh` then prints `Check INFERENCE_* values in .env` — **misleading**. Inference
+configuration (Step `[4/8]`) usually succeeds before the sandbox build fails. This is
+upstream NemoClaw vs OpenClaw version drift, not a demo or API-key bug.
 
-1. `~/NemoClaw/scripts/rcf_patch.py` — replace the `assert m, "..."` line with a warn-and-skip block that appends a sentinel comment containing `OPENSHELL_SANDBOX EACCES` so the Dockerfile's downstream grep still passes:
+**Fix applied on this machine (Option B — resilient patches)**
 
-   ```python
-   m = pat.search(fn_src)
-   if not m:
-       print("WARN: rcf_patch pattern absent — skipping EACCES wrap", file=sys.stderr)
-       with open(p, "a") as fh:
-           fh.write("\n/* nemoclaw rcf_patch: OPENSHELL_SANDBOX EACCES wrap skipped */\n")
-       sys.exit(0)
-   ```
+Edits live in the NemoClaw source checkout that `nemoclaw onboard` copies into every
+sandbox build context (`~/.nemoclaw/source/`, not this demo repo). Re-apply on any new
+host that hits the same failure.
 
-2. `~/NemoClaw/Dockerfile` — change the giant `RUN set -eu; ...` patch block (around line 154) to `RUN set -u; ...` and wrap each patch in `if [ -n "$x" ]; then apply; else echo "WARN: skipped"; fi`. Each patch becomes individually skippable. Append `exit 0` to the very end.
+**1. `~/.nemoclaw/source/scripts/rcf_patch.py`**
 
-Both files are copied into the sandbox build context by `~/NemoClaw/dist/lib/sandbox-build-context.js` at every `nemoclaw onboard` run, so edits to the source files are picked up on the next install.
+Replace the hard `assert` on the `tryWriteSingleTopLevelIncludeMutation` regex with a
+warn-and-skip path. When the pattern is absent (or `replaceConfigFile` is missing),
+append a sentinel comment containing `OPENSHELL_SANDBOX EACCES` so the Dockerfile's
+downstream grep still passes, then exit 0:
 
-**Sandbox hardening tradeoff** — skipped patches mean OpenClaw runs without these protections inside the sandbox: fetch-guard strict mode, explicit-proxy assert, lstat→stat (plugin install symlink containment), EACCES wrap, 60s WS handshake timeout. Acceptable for dev/demo, not for production. Remove once upstream nemoclaw ships updated anchors.
+```python
+def skip_with_sentinel(reason):
+    print(f"WARN: rcf_patch {reason} — skipping EACCES wrap", file=sys.stderr)
+    with open(p, "a") as fh:
+        fh.write("\n/* nemoclaw rcf_patch: OPENSHELL_SANDBOX EACCES wrap skipped */\n")
+    sys.exit(0)
+
+fn_start = src.find("async function replaceConfigFile(")
+if fn_start == -1:
+    skip_with_sentinel("replaceConfigFile function not found")
+# ... (fn body extraction unchanged) ...
+m = pat.search(fn_src)
+if not m:
+    skip_with_sentinel("pattern absent")
+```
+
+**2. `~/.nemoclaw/source/Dockerfile` (OpenClaw patch `RUN`, ~line 154)**
+
+Make every patch individually skippable so a single anchor miss does not abort the
+whole build:
+
+- Change `RUN set -eu;` → `RUN set -u;` (drop `-e`; individual patches warn instead of exit)
+- Append `|| true` to each `grep` that discovers patch targets
+- Wrap Patches 1–5 in `if [ -n "$var" ]; then …; else echo "WARN: Patch N skipped …"; fi`
+- Replace Patch 4's hard `grep … || exit 1` with a warn-only fallback
+- Append `exit 0` at the end of the `RUN` block
+
+**3. `install.sh` (this repo) — Step 4b inference verify**
+
+Large models (e.g. `nvidia/nemotron-3-ultra-550b-a55b`) can exceed OpenShell's gateway
+verify timeout even when direct `curl` to `INFERENCE_BASE_URL` succeeds. `install.sh`
+passes `--no-verify` to `openshell inference set` so Step 4b does not re-probe the
+endpoint on every re-run. Validate manually once if needed:
+
+```bash
+source .env
+curl -sS -m 60 \
+  -H "Authorization: Bearer $INFERENCE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"'"$INFERENCE_MODEL"'","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
+  "$INFERENCE_BASE_URL/chat/completions" | head -c 200
+```
+
+After editing `~/.nemoclaw/source/`, re-run `bash install.sh` (or `nemoclaw onboard` if
+no sandbox exists yet). No NemoClaw reinstall required — the build context is copied
+fresh on each onboard.
+
+**Sandbox hardening tradeoff** — skipped patches mean OpenClaw runs without these
+protections inside the sandbox: fetch-guard strict mode, explicit-proxy assert,
+lstat→stat (plugin install symlink containment), EACCES wrap, 60s WS handshake timeout.
+Acceptable for dev/demo, not for production. Revert the local edits once upstream
+NemoClaw ships updated anchors for OpenClaw 2026.5.22+.
+
+**Step 4b — `Could not set inference model` / verify timeout (unrelated to API key)**
+
+If `openshell inference set` fails with `request to …/chat/completions timed out`, the
+model and key are often fine — the gateway-side verify probe is slow or flaky. Confirm
+with the `curl` one-liner above. Current `install.sh` uses `--no-verify`; to set
+manually:
+
+```bash
+source .env
+openshell inference set \
+  --provider "${INFERENCE_PROVIDER_NAME:-nvidia}" \
+  --model    "$INFERENCE_MODEL" \
+  --no-verify
+```
+
+Re-run `bash install.sh <sandbox>` afterwards so Step 4c re-patches `openclaw.json`.
 
 **`nemoclaw onboard` fails with auth error (Step 4)**
 
@@ -644,7 +767,8 @@ openshell provider create \
 
 openshell inference set \
   --provider "${INFERENCE_PROVIDER_NAME:-nvidia}" \
-  --model    "$INFERENCE_MODEL"
+  --model    "$INFERENCE_MODEL" \
+  --no-verify
 
 openshell inference get
 ```
@@ -736,14 +860,17 @@ The workflow ran but the AI Agent received an empty prompt. Checklist:
    (webhook v2.1 nests the POST body under `$json.body`). If the operating
    protocol is pasted into the **prompt** field instead of the **System Message**,
    the agent echoes the protocol — move it to `options.systemMessage`.
-2. **All workflows active?** The orchestrator **and** every sub-workflow it calls
-   as a tool must be active, or tool calls fail with
+2. **All workflows published?** The orchestrator **and** every sub-workflow it calls
+   as a tool must be published, or tool calls fail with
    `Workflow is not active and cannot be executed`:
    `docker exec n8n n8n publish:workflow --id=<id>` for each of the four workflow
    IDs, then `docker restart n8n`.
-3. **Sub-workflow Code nodes return data?** Empty Code nodes surface as
+3. **Credential + model set?** Missing `NVIDIAInferenceAPI` or a Bedrock model ID
+   with an NVIDIA key causes `Error in workflow` before the agent can respond.
+   Run `bash n8n_selfhost/fix_n8n_setup.sh`.
+4. **Sub-workflow Code nodes return data?** Empty Code nodes surface as
    `Unknown error`. Each must `return [{ json: {...} }]`.
-4. **Code node language = JavaScript.** The stock n8n container has **no Python
+5. **Code node language = JavaScript.** The stock n8n container has **no Python
    task runner** (`Failed to start Python task runner … Python 3 is missing`), so
    Python Code nodes fail. Use `language: javaScript`.
 

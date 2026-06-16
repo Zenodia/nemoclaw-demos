@@ -256,6 +256,7 @@ fi
 openshell inference set \
   --provider "$INFERENCE_PROVIDER_NAME" \
   --model    "$INFERENCE_MODEL" \
+  --no-verify \
   && ok "Inference: $INFERENCE_PROVIDER_NAME / $INFERENCE_MODEL" \
   || fail "Could not set inference model."
 

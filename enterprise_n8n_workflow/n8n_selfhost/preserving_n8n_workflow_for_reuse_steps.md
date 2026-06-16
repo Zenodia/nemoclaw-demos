@@ -8,7 +8,8 @@ any API keys.
 **Which part do you need?**
 - **Redeploying a copy someone sent you?** → jump to
   [Re-deployment Steps](#re-deployment-steps---on-the-new-machine) and
-  [Using your own API keys](#using-your-own-api-keys). (Skip Option A.)
+  [Using your own API keys](#using-your-own-api-keys). After import, run
+  `bash fix_n8n_setup.sh` with your `nvapi-…` key in `../.env`.
 - **You own the running instance and want to re-save it?** → Option A below.
 
 ---
@@ -61,28 +62,61 @@ docker exec n8n cat /home/node/.n8n/config \
 
 ## Using your own API keys
 
-The workflows reference exactly **one** credential by name: **`NVIDIAInferenceAPI`**
-(type **OpenAI API** / `openAiApi`), used by the orchestrator's chat-model node.
-To run with your own key — no need for the original owner's secrets:
+Every new user brings their **own** NVIDIA API key (`nvapi-…`). This repo ships
+**no** real keys — only a blank `credentials-export.json` template.
 
-**Easiest — n8n UI (recommended):**
+### Two places your key is used (they are separate!)
+
+| Where | What it powers | How you set it |
+|---|---|---|
+| **`.env` → `INFERENCE_API_KEY`** | The OpenClaw agent inside the NemoClaw sandbox (`install.sh` / `nemoclaw onboard`) | Edit `.env` in the repo root |
+| **n8n → `NVIDIAInferenceAPI` credential** | The **EnterpriseOrchestrator** LLM node (the workflow that runs when you POST `/webhook/agent-hub`) | n8n UI **or** `fix_n8n_setup.sh` (below) |
+
+> ⚠️ **`INFERENCE_API_KEY` in `.env` is NOT wired into n8n automatically.**
+> After import, n8n has **zero** credentials — the workflow references credential
+> ID `rO9tDpks1CwG9AN7` which does not exist on your instance until you create it.
+> Without it you get `{"message":"Error in workflow"}` (HTTP 500).
+
+You can use the **same** `nvapi-…` value in both places; they are just configured
+independently.
+
+### Fastest — automated (`fix_n8n_setup.sh`)
+
+After importing workflows (step 3 below), run from the repo root:
+
+```bash
+# Reads INFERENCE_API_KEY + INFERENCE_BASE_URL from ../.env
+# Creates NVIDIAInferenceAPI credential, sets model, publishes all 4 workflows, restarts, verifies
+bash fix_n8n_setup.sh
+```
+
+This script:
+1. Creates the **`NVIDIAInferenceAPI`** credential (`openAiApi`) with your `nvapi-…` key
+2. Sets the orchestrator model to `OPENCLAW_MODEL` from `.env` (default:
+   `nvidia/llama-3.3-nemotron-super-49b-v1.5`)
+3. **Publishes** all 4 workflows and restarts n8n
+4. Waits for the webhook and runs a smoke test (may take **1–3 min** — the agent
+   runs the full guardrail chain)
+
+### Manual — n8n UI
+
 1. Import the workflows (next section), then open **EnterpriseOrchestrator**.
 2. Click the **OpenAI Chat Model** node → **Credential → Create New**:
-   - **API Key:** your own key — Claude `sk-…`, NVIDIA `nvapi-…`, or any OpenAI-compatible key.
-   - **Base URL:** the endpoint **that issues your key**, e.g.
-     - NVIDIA build/Nemotron: `https://integrate.api.nvidia.com/v1`
-     - the original demo used: `https://inference-api.nvidia.com/v1`
+   - **API Key:** your own `nvapi-…` (or any OpenAI-compatible key)
+   - **Base URL:** the endpoint that issues your key, e.g.
+     `https://integrate.api.nvidia.com/v1`
    - (You can name it `NVIDIAInferenceAPI` to match, but the name is cosmetic.)
-3. **Set the model** on that same node — the import ships a hardcoded
-   `aws/anthropic/bedrock-claude-sonnet-4-6`. Change the **Model** field to one your
-   endpoint actually serves (e.g. a `nvidia/…` Nemotron id, or your Claude model).
-4. **Save.** Selecting/creating the credential *on the node* re-binds it correctly.
+3. **Set the model** on that same node — use one your endpoint actually serves, e.g.
+   `nvidia/llama-3.3-nemotron-super-49b-v1.5` (the committed export already ships
+   this model; older copies may still have `aws/anthropic/bedrock-claude-sonnet-4-6`
+   which will **not** work with an NVIDIA key).
+4. **Publish** the workflow (n8n 2.22+: **Save** alone updates a draft — click
+   **Publish** so production webhooks pick up your changes).
 
-> ⚠️ **Bind by ID, not name.** The imported node references the original
-> credential's **ID** (`rO9tDpks1CwG9AN7`). A standalone credential you create
-> elsewhere gets a *new* ID and won't auto-link — always create/pick the
-> credential **from the node** (step 2) so n8n rebinds it. If the node shows
-> "credential not set" after import, that's why: open it and select your credential.
+> ⚠️ **Bind by ID, not name.** The imported node references credential ID
+> `rO9tDpks1CwG9AN7`. A credential you create elsewhere gets a *new* ID and won't
+> auto-link — always create/pick the credential **from the node** (step 2) so n8n
+> rebinds it. If the node shows "credential not set" after import, that's why.
 
 **Or via env var (no key stored in the credential):** start n8n with your key in
 the environment, then put the expression `={{ $env.NVIDIA_API_KEY }}` in the
@@ -137,46 +171,71 @@ docker exec n8n n8n list:workflow      # should list all 4
 ```
 
 **4. Set up YOUR credential + model** — see
-[Using your own API keys](#using-your-own-api-keys). In the UI, open
-**EnterpriseOrchestrator** → **OpenAI Chat Model** node → create your credential
-(your key + correct Base URL) **and** set the **Model** field to one your endpoint
-serves. Save the workflow.
+[Using your own API keys](#using-your-own-api-keys).
+
+**Recommended (covers steps 4–6 in one shot):** populate `../.env` with your
+`nvapi-…` key, then:
+
+```bash
+bash fix_n8n_setup.sh    # credential + model + publish + restart + verify
+```
+
+Skip to the end if this succeeds. **Or** continue manually below.
+
+**Manual UI:** **EnterpriseOrchestrator** → **OpenAI Chat Model** → create
+credential (your `nvapi-…` + Base URL) → set model → **Publish**.
 
 > Do **not** import the sanitized `credentials-export.json` (its `data` is blank).
 > *(Only if you kept a `--with-secrets` private backup AND started n8n with the
 > matching `N8N_ENCRYPTION_KEY`:*
 > `docker exec n8n n8n import:credentials --input=/home/node/.n8n/creds.json`*.)*
 
-**5. Activate ALL 4 workflows, THEN restart** — imports arrive **inactive**, and a
-webhook is **not** reachable until its workflow is active (you'd get a 404).
+**5. Publish ALL 4 workflows, THEN restart** — skip if you ran `fix_n8n_setup.sh`.
+`import:workflow` deactivates everything. On n8n 2.22+ use **`publish:workflow`**
+(not the deprecated `update:workflow --active=true`). A webhook is **not** reachable
+until its workflow is published and active (you'd get `Cannot POST /webhook/agent-hub`).
 
-> ⚠️ The 3 sub-workflows must be active too — this n8n version refuses to run an
-> inactive workflow invoked as a tool (`Workflow is not active and cannot be
-> executed`), which breaks the orchestrator's guardrail calls.
+> ⚠️ The 3 sub-workflows must be published too — n8n refuses to run an inactive
+> workflow invoked as a tool (`Workflow is not active and cannot be executed`),
+> which breaks the orchestrator's guardrail calls.
 
 ```bash
 for id in TzLcGZKuV0TZxXHs 8eFCKIE4qlfhMna0 mAPFaEvgygizLfaY XPYjIUowrNmN5aUj; do
-  docker exec n8n n8n update:workflow --id=$id --active=true
+  docker exec n8n n8n publish:workflow --id=$id
 done
 docker restart n8n
-# Confirm all 4 register at boot:
-docker logs n8n --since 30s 2>&1 | grep -A5 'Start Active Workflows'
+# Wait ~15s for webhooks to register, then confirm all 4 activated at boot:
+docker logs n8n --since 30s 2>&1 | grep 'Activated workflow'   # expect 4 lines
 ```
-(Or in the UI: open each of the 4 → toggle **Active**.)
+
+(Or in the UI: open each of the 4 → **Publish**.)
 
 > The workflow IDs above are preserved on import, so the loop works as-is. If you
 > rebuilt the workflows by hand, grab the new IDs from `n8n list:workflow`.
 
+> ⚠️ **Never `docker restart n8n` without publishing first** — a restart reloads
+> only published workflows. If you edited credential/model in the UI but only hit
+> **Save** (not **Publish**), your changes won't survive a restart.
+
 **6. Verify the pipeline** — only now the webhook is live. The AI Agent reads the
 webhook body, so post `chatInput`:
+
 ```bash
-curl -X POST http://localhost:5678/webhook/agent-hub \
+curl -s --max-time 300 -X POST http://localhost:5678/webhook/agent-hub \
   -H "Content-Type: application/json" \
   -d '{"chatInput": "Analyze GPU cluster utilization"}'
 ```
-Expect a JSON execution plan with all 3 guardrails (`policy_guard`, `task_router`,
-`cost_gate`) **PASSED**. If you get `No prompt specified` or an echoed system
-prompt, the credential/model isn't set on the node (Step 4) — fix and retry.
+
+Expect **HTTP 200** and a JSON execution plan with all 3 guardrails
+(`policy_guard`, `task_router`, `cost_gate`) **PASSED**. The call can take
+**1–3 minutes** — the agent runs the full LLM + tool chain.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Cannot POST /webhook/agent-hub` (404) | Workflows not published, or tested too soon after restart | `publish:workflow` on all 4 → restart → wait 15s |
+| `{"message":"Error in workflow"}` (500) | Missing `NVIDIAInferenceAPI` credential or wrong model for your endpoint | Run `fix_n8n_setup.sh` or create credential on the **OpenAI Chat Model** node |
+| `No prompt specified` | Webhook body not reaching the agent (rare with stock export) | Check AI Agent prompt reads `$json.body?.chatInput` |
+| UI edit "didn't work" after restart | Saved a **draft** but didn't **Publish** | Open workflow → **Publish** → restart |
 
 > **Code-node language:** the sub-workflows use **JavaScript** Code nodes. The
 > stock n8n image has no Python task runner, so Python Code nodes fail at runtime.

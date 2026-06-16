@@ -21,8 +21,9 @@ OpenClaw chat (sandbox) ─► skill venv ─► host:4300 (n8n_mcp_server.py)
 1. **Populate `.env`** (5 keys: `N8N_INSTANCE_URL`, `N8N_MCP_TOKEN`, `INFERENCE_API_KEY`,
    `INFERENCE_BASE_URL`, `INFERENCE_MODEL`) — [guide §2](n8n-workflow-openclaw-guide.md#2-environment-setup).
 2. **Bring up the self-hosted n8n FIRST** (it must be reachable before the wrapper) —
-   `cd n8n_selfhost && bash 0_build_and_run_docker.sh`, import + activate workflows, add
-   your own model key — [guide §3](n8n-workflow-openclaw-guide.md#3-bring-up-the-self-hosted-n8n-first)
+   `cd n8n_selfhost && bash 0_build_and_run_docker.sh`, import workflows, then
+   `bash fix_n8n_setup.sh` (wires your `nvapi-…` key into n8n) —
+   [guide §3](n8n-workflow-openclaw-guide.md#3-bring-up-the-self-hosted-n8n-first)
    / [`n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md`](n8n_selfhost/preserving_n8n_workflow_for_reuse_steps.md).
 3. **Install the OpenClaw + MCP stack:** `bash install.sh [sandbox-name]` —
    [guide §4](n8n-workflow-openclaw-guide.md#4-one-command-install-openclaw--mcp).
@@ -45,7 +46,7 @@ enterprise_n8n_workflow/
 ├── policy/sandbox_policy.yaml      # opens port 4300 to skill venv (python3.10–3.13)
 ├── n8n_workflow_skills/            # the agent's skill: SKILL.md, HEARTBEAT.md, scripts/n8n_client.py
 └── n8n_selfhost/                   # bundled self-hosted n8n: build script, workflow export,
-                                    #   sanitized cred template, redeploy guide
+                                    #   fix_n8n_setup.sh, redeploy guide
 ```
 
 ## Skill tools (agent-facing)
@@ -61,6 +62,13 @@ Daily ops (restart wrapper / systemd service / logs / re-upload skill) and the f
 symptom→fix table live in the guide:
 [§7 Daily Operations](n8n-workflow-openclaw-guide.md#7-daily-operations) ·
 [§9 Troubleshooting](n8n-workflow-openclaw-guide.md#9-troubleshooting).
+
+**Known install gotchas** (see guide for full steps):
+
+| Issue | Cause | Fix location |
+|-------|--------|--------------|
+| Sandbox Docker build fails at step 18 (`rcf_patch.py` assertion) | Fresh `sandbox-base` ships OpenClaw ≥ 2026.5.22; NemoClaw 0.0.36 patch anchors target ≤ 2026.4.24 (`min_openclaw_version: "2026.4.24"`) | Option B patches in `~/.nemoclaw/source/scripts/rcf_patch.py` + `~/.nemoclaw/source/Dockerfile` — [guide §9](n8n-workflow-openclaw-guide.md#9-troubleshooting) |
+| Step 4b `openshell inference set` verify timeout | Gateway probe slower than direct `curl` for large models | `install.sh` uses `--no-verify`; validate endpoint manually if needed |
 
 > 🔐 Never commit `.env` or real keys. The bundled `n8n_selfhost/` ships **sanitized**
 > credential templates only — each user plugs in their own key at deploy time.
