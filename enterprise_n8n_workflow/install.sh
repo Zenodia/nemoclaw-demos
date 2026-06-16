@@ -3,6 +3,7 @@
 # Enterprise n8n Workflow — Full Install Script
 #
 # Sets up the complete stack:
+#   0. Sync demo Dockerfile → ~/.nemoclaw/source (OpenClaw 2026.4.24 compatibility)
 #   1. Host venv  (fastmcp + httpx + python-dotenv + colorama)
 #   2. MCP wrapper server  (host Python process on port 4300)
 #   3. Sandbox network policy  (allows skill venv to reach port 4300)
@@ -52,9 +53,28 @@ echo -e "  Sandbox   : ${GREEN}${SANDBOX_ARG:-auto-detect}${NC}"
 echo ""
 
 # =============================================================================
-# STEP 0 — Clean up stale MCP server process
+# STEP 0 — Sync demo Dockerfile into NemoClaw source
 # =============================================================================
-step "Step 0 — Clean up stale MCP server"
+step "Step 0 — Sync NemoClaw Dockerfile"
+
+DEMO_DOCKERFILE="$SCRIPT_DIR/Dockerfile"
+NEMOCLAW_SOURCE_DIR="${NEMOCLAW_SOURCE:-$HOME/.nemoclaw/source}"
+NEMOCLAW_DOCKERFILE="$NEMOCLAW_SOURCE_DIR/Dockerfile"
+
+[ -f "$DEMO_DOCKERFILE" ] || fail "Demo Dockerfile not found at $DEMO_DOCKERFILE"
+[ -d "$NEMOCLAW_SOURCE_DIR" ] || fail "NemoClaw source not found at $NEMOCLAW_SOURCE_DIR — install NemoClaw first."
+
+if [ -f "$NEMOCLAW_DOCKERFILE" ] && cmp -s "$DEMO_DOCKERFILE" "$NEMOCLAW_DOCKERFILE"; then
+  ok "Dockerfile already up to date ($NEMOCLAW_DOCKERFILE)"
+else
+  cp "$DEMO_DOCKERFILE" "$NEMOCLAW_DOCKERFILE"
+  ok "Copied $DEMO_DOCKERFILE → $NEMOCLAW_DOCKERFILE"
+fi
+
+# =============================================================================
+# STEP 1 — Clean up stale MCP server process
+# =============================================================================
+step "Step 1 — Clean up stale MCP server"
 
 if [ -f "$MCP_PID_FILE" ]; then
   OLD_PID=$(cat "$MCP_PID_FILE" 2>/dev/null || true)
@@ -74,9 +94,9 @@ fi
 ok "Environment clean"
 
 # =============================================================================
-# STEP 1 — Prerequisites
+# STEP 2 — Prerequisites
 # =============================================================================
-step "Step 1 — Prerequisites"
+step "Step 2 — Prerequisites"
 
 command -v python3   >/dev/null 2>&1 || fail "python3 not found. Install Python 3.10+."
 command -v openshell >/dev/null 2>&1 || fail "openshell CLI not found. Is NemoClaw installed?"
@@ -95,9 +115,9 @@ ok "uv        : $(uv --version)"
 ok "openshell : $(openshell --version 2>/dev/null | head -1 || echo found)"
 
 # =============================================================================
-# STEP 2 — Validate .env (required for the host wrapper)
+# STEP 3 — Validate .env (required for the host wrapper)
 # =============================================================================
-step "Step 2 — Validate .env"
+step "Step 3 — Validate .env"
 
 [ -f "$ENV_FILE" ] || fail ".env not found at $ENV_FILE. Create it with N8N_INSTANCE_URL and N8N_MCP_TOKEN."
 
@@ -129,9 +149,9 @@ ok "INFERENCE_MODEL     : $INFERENCE_MODEL"
 ok "Provider            : $INFERENCE_PROVIDER_NAME ($INFERENCE_PROVIDER_TYPE)"
 
 # =============================================================================
-# STEP 3 — Host Python venv
+# STEP 4 — Host Python venv
 # =============================================================================
-step "Step 3 — Host Python venv ($HOST_VENV)"
+step "Step 4 — Host Python venv ($HOST_VENV)"
 
 cd "$SCRIPT_DIR"
 
@@ -152,9 +172,9 @@ ok "Host requirements installed (fastmcp, httpx, python-dotenv, colorama)"
 ok "Import check passed"
 
 # =============================================================================
-# STEP 4 — Detect sandbox
+# STEP 5 — Detect sandbox
 # =============================================================================
-step "Step 4 — Detect sandbox"
+step "Step 5 — Detect sandbox"
 
 _live_sandboxes() {
   openshell sandbox list 2>/dev/null \
@@ -167,27 +187,47 @@ LIVE_NAMES=$(_live_sandboxes)
 LIVE_COUNT=$(echo "$LIVE_NAMES" | grep -c . || true)
 
 # No sandbox? Drive 'nemoclaw onboard' end-to-end without prompts using
-# INFERENCE_* from .env. We pick the "custom" (Other OpenAI-compatible)
-# provider and feed it INFERENCE_BASE_URL + INFERENCE_API_KEY directly —
-# the NVIDIA Endpoints menu option points at integrate.api.nvidia.com
-# (the API Catalog) and would auth against the wrong endpoint.
-# The canonical INFERENCE_PROVIDER_NAME is wired up below in the
-# inference-provider step.
+# INFERENCE_* from .env.
+#
+# nemoclaw onboard probes the chosen model with a ~15s curl budget. Ultra-large
+# models (e.g. nemotron-3-ultra-550b) routinely exceed that and fail validation
+# even when the API key and endpoint are fine. Probe with a fast catalog model
+# during onboard; Step 4b below applies INFERENCE_MODEL with --no-verify.
+#
+# For NVIDIA integrate.api.nvidia.com use the built-in "build" (NVIDIA Endpoints)
+# provider — same URL, skips the Responses API probe. Other OpenAI-compatible
+# URLs use the "custom" provider with chat-completions-only probing.
 if [ "${LIVE_COUNT:-0}" -eq 0 ] && [ -z "$SANDBOX_ARG" ]; then
   info "No sandbox found — running 'nemoclaw onboard' (non-interactive)..."
   command -v nemoclaw >/dev/null 2>&1 || fail "nemoclaw CLI not found. Install NemoClaw and retry."
 
-  export NEMOCLAW_NON_INTERACTIVE=1
-  export NEMOCLAW_PROVIDER=custom
-  export NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}"
-  export NEMOCLAW_MODEL="${INFERENCE_MODEL}"
-  export COMPATIBLE_API_KEY="${INFERENCE_API_KEY}"
-  # Some legacy code paths still look for NVIDIA_API_KEY — stage same value.
-  export NVIDIA_API_KEY="${NVIDIA_API_KEY:-$INFERENCE_API_KEY}"
-  export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
+  ONBOARD_MODEL="${NEMOCLAW_ONBOARD_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1.5}"
 
-  nemoclaw onboard --non-interactive --yes-i-accept-third-party-software \
-    || fail "nemoclaw onboard failed. Check INFERENCE_* values in .env, then re-run install.sh."
+  export NEMOCLAW_NON_INTERACTIVE=1
+  export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
+  export NVIDIA_API_KEY="${NVIDIA_API_KEY:-$INFERENCE_API_KEY}"
+
+  case "${INFERENCE_BASE_URL}" in
+    *integrate.api.nvidia.com*)
+      export NEMOCLAW_PROVIDER=build
+      export NEMOCLAW_MODEL="$ONBOARD_MODEL"
+      ;;
+    *)
+      export NEMOCLAW_PROVIDER=custom
+      export NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}"
+      export NEMOCLAW_MODEL="$ONBOARD_MODEL"
+      export COMPATIBLE_API_KEY="${INFERENCE_API_KEY}"
+      export NEMOCLAW_PREFERRED_API=openai-completions
+      ;;
+  esac
+
+  if [ "$ONBOARD_MODEL" != "$INFERENCE_MODEL" ]; then
+    info "Onboard validation model: $ONBOARD_MODEL (runtime model in Step 4b: $INFERENCE_MODEL)"
+  fi
+
+  # --fresh avoids resuming a stale session that still has the wrong provider/model.
+  nemoclaw onboard --fresh --non-interactive --yes-i-accept-third-party-software \
+    || fail "nemoclaw onboard failed. Large models often exceed the 15s validation probe — set NEMOCLAW_ONBOARD_MODEL to a faster catalog model in .env, verify INFERENCE_* with curl, then re-run install.sh."
   ok "Onboarding complete"
 
   info "Waiting for sandbox to appear..."
