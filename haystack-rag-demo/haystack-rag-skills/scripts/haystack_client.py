@@ -2,15 +2,17 @@
 """
 Haystack RAG client — sandbox skill component.
 
-The OpenClaw agent (which already has an LLM) decides which operation to call
-and with what arguments. This script makes a single HTTP request to the host-side
-Haystack RAG server and prints the result to stdout. No NVIDIA_API_KEY needed
-in the sandbox — all inference happens on the host.
+The OpenClaw agent decides which operation to call and with what arguments.
+This script makes a single HTTP request to the host-side Haystack RAG server
+and prints the result to stdout. No NVIDIA_API_KEY needed in the sandbox —
+all inference happens on the host.
 
 Usage:
   <skill_dir>/venv/bin/python3 haystack_client.py <command> [options]
 
 Commands:
+  health            Check server liveness and indexed chunk count
+  setup                                Index the bundled sample document
   index             [--data-dir PATH]
   query             --question TEXT [--top-k N]
   list-documents
@@ -92,6 +94,18 @@ def main() -> None:
 
     sub = root.add_subparsers(dest="command", metavar="<command>", required=True)
 
+    # health
+    sub.add_parser(
+        "health",
+        help="Check server liveness and indexed chunk count.",
+    )
+
+    # setup
+    sub.add_parser(
+        "setup",
+        help="Index the bundled sample document (Haystack intro). Run once on first use.",
+    )
+
     # index
     p_index = sub.add_parser(
         "index",
@@ -125,7 +139,25 @@ def main() -> None:
     parsed = root.parse_args()
     server_url = parsed.server_url
 
-    if parsed.command == "index":
+    if parsed.command == "health":
+        result = _call(server_url, "GET", "/health")
+        print(
+            f"Status : {result.get('status', 'unknown')}\n"
+            f"Chunks : {result.get('indexed_chunks', 0)}\n"
+            f"Store  : {result.get('store_path', 'unknown')}"
+        )
+
+    elif parsed.command == "setup":
+        # The server indexes its own bundled sample document (host-side path).
+        # We do NOT send a sandbox path — the server resolves the sample dir itself.
+        result = _call(server_url, "POST", "/setup")
+        print(
+            f"Setup complete.\n"
+            f"Indexed {result['indexed']} new chunk(s) from {result['files']} file(s).\n"
+            f"Total chunks in store: {result['total']}"
+        )
+
+    elif parsed.command == "index":
         payload: dict = {}
         if parsed.data_dir:
             payload["data_dir"] = parsed.data_dir

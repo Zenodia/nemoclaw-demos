@@ -98,8 +98,14 @@ INFERENCE_BASE_URL="${INFERENCE_BASE_URL:-https://integrate.api.nvidia.com/v1}"
 INFERENCE_MODEL="${INFERENCE_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1.5}"
 OPENCLAW_MODEL="${OPENCLAW_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1.5}"
 
+# Onboard model: used only for nemoclaw onboard's own verification smoke-test.
+# Large models (550b+) time out during that sync check — use a fast 49b here.
+# After onboard, install.sh patches the sandbox openclaw.json to the real INFERENCE_MODEL.
+NEMOCLAW_ONBOARD_MODEL="${NEMOCLAW_ONBOARD_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1.5}"
+
 ok "NVIDIA_API_KEY      : found"
-ok "INFERENCE_MODEL     : $INFERENCE_MODEL"
+ok "INFERENCE_MODEL     : $INFERENCE_MODEL  (runtime model — patched into sandbox after onboard)"
+ok "ONBOARD_MODEL       : $NEMOCLAW_ONBOARD_MODEL  (used only for nemoclaw onboard verification)"
 ok "OPENCLAW_MODEL      : $OPENCLAW_MODEL"
 echo ""
 
@@ -203,6 +209,14 @@ ok "Host dependencies installed in .venv"
 # Create data directories the server will use
 mkdir -p "$SCRIPT_DIR/data/documents"
 ok "Data directory ready at $SCRIPT_DIR/data/documents"
+
+# The skill ships a sample.txt about Haystack; the server needs to be able to
+# reach it at index time via the skill's POST /index {"data_dir": ...} call.
+# The skill's data/ dir is inside the sandbox (read-only from the host), so we
+# keep the authoritative copy inside the skill source tree and the server reads
+# it directly when the skill sends its path over the REST API.
+# No copy needed — the server accepts any absolute path as data_dir.
+ok "Sample document is at $SCRIPT_DIR/haystack-rag-skills/data/sample.txt"
 echo ""
 
 # ── Step 7: Start Haystack RAG server as background process ──────
@@ -293,7 +307,7 @@ if [ "${LIVE_COUNT:-0}" -eq 0 ]; then
   export NEMOCLAW_NON_INTERACTIVE=1
   export NEMOCLAW_PROVIDER=custom
   export NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}"
-  export NEMOCLAW_MODEL="${INFERENCE_MODEL}"
+  export NEMOCLAW_MODEL="${NEMOCLAW_ONBOARD_MODEL}"   # fast model for onboard verification only
   export COMPATIBLE_API_KEY="${NVIDIA_API_KEY}"
   export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 
@@ -320,11 +334,22 @@ openshell provider create \
   || ok "Provider '$INFERENCE_PROVIDER_NAME' already exists"
 
 info "Setting inference model to $INFERENCE_MODEL..."
-openshell inference set \
-  --provider "$INFERENCE_PROVIDER_NAME" \
-  --model "$INFERENCE_MODEL" \
-  && ok "Inference set: $INFERENCE_PROVIDER_NAME / $INFERENCE_MODEL" \
-  || fail "Could not set inference model."
+# Large models (550b+) may time out during the sync endpoint verification.
+# Try with verification first; if that times out, retry with --no-verify.
+# The model is still usable — the verification just does a blocking smoke-test call.
+if openshell inference set \
+     --provider "$INFERENCE_PROVIDER_NAME" \
+     --model "$INFERENCE_MODEL" 2>/dev/null; then
+  ok "Inference set: $INFERENCE_PROVIDER_NAME / $INFERENCE_MODEL"
+elif openshell inference set \
+     --provider "$INFERENCE_PROVIDER_NAME" \
+     --model "$INFERENCE_MODEL" \
+     --no-verify 2>/dev/null; then
+  ok "Inference set (skipped verification — model may be slow to cold-start): $INFERENCE_PROVIDER_NAME / $INFERENCE_MODEL"
+  warn "If queries fail, confirm the model is available: curl https://integrate.api.nvidia.com/v1/models | grep $INFERENCE_MODEL"
+else
+  fail "Could not set inference model '$INFERENCE_MODEL'. Check INFERENCE_* values in .env."
+fi
 echo ""
 
 # ── Step 9: Resolve sandbox name ─────────────────────────────────
@@ -389,18 +414,37 @@ os.chmod(path, 0o600)
 " 2>/dev/null || true
 
 # ── Step 10: Apply sandbox network policy ───────────────────────
-# Applied per-sandbox (not global) so nemoclaw onboard's preset step can run
-# without conflict. Safe on a fresh sandbox — no filesystem_policy in our YAML
-# means nothing to remove from the sandbox image's built-in policy.
-# On a live sandbox, OpenShell may reject policy changes that remove filesystem
-# rules; upload + skill registration still proceed, but egress to port 9004 may
-# need a sandbox recreate if policy was never applied successfully.
-info "Applying sandbox network policy..."
-openshell policy set "$SANDBOX_NAME" \
-  --policy "$SCRIPT_DIR/policy/sandbox_policy.yaml" \
-  --wait \
-  && ok "Policy applied (haystack_rag_host egress on port $RAG_PORT)" \
-  || warn "Policy set failed — egress to port $RAG_PORT may be blocked (recreate sandbox if queries fail)"
+# We use the minimal egress-only YAML (no filesystem_policy section) so we
+# don't conflict with filesystem rules added by nemoclaw onboard presets.
+# Try nemoclaw policy-add first (additive, won't touch filesystem rules);
+# fall back to openshell policy set if nemoclaw policy-add isn't available.
+EGRESS_POLICY="$SCRIPT_DIR/policy/haystack-rag-egress.yaml"
+info "Applying haystack_rag_host egress policy (port $RAG_PORT)..."
+POLICY_OK=false
+
+if nemoclaw "$SANDBOX_NAME" policy-add --policy "$EGRESS_POLICY" 2>/dev/null; then
+  ok "Policy applied via nemoclaw policy-add (haystack_rag_host egress on port $RAG_PORT)"
+  POLICY_OK=true
+elif openshell policy set "$SANDBOX_NAME" \
+     --policy "$EGRESS_POLICY" \
+     --wait 2>/dev/null; then
+  ok "Policy applied via openshell policy set (haystack_rag_host egress on port $RAG_PORT)"
+  POLICY_OK=true
+else
+  # Last resort: try the full policy file (may fail on live sandboxes with filesystem rules)
+  openshell policy set "$SANDBOX_NAME" \
+    --policy "$SCRIPT_DIR/policy/sandbox_policy.yaml" \
+    --wait 2>/dev/null \
+    && ok "Policy applied via full sandbox_policy.yaml" \
+    && POLICY_OK=true \
+    || true
+fi
+
+if [ "$POLICY_OK" = false ]; then
+  warn "Could not apply egress policy — egress to port $RAG_PORT may be blocked."
+  warn "To fix manually, run:"
+  warn "  nemoclaw $SANDBOX_NAME policy-add --policy $EGRESS_POLICY"
+fi
 echo ""
 
 # ── Step 11: Install haystack-rag-skills in sandbox ─────────────
@@ -414,11 +458,34 @@ SKILL_DEST_LEGACY="/sandbox/.openclaw-data/workspace/skills/$SKILL_NAME"
 enable_haystack_skill_registry() {
   openshell sandbox exec -n "$SANDBOX_NAME" -- python3 - <<'PYEOF'
 import json, os, sys
-p = "/sandbox/.openclaw/openclaw.json"
-if not os.path.exists(p):
-    print("skip: openclaw.json not found", file=sys.stderr)
-    sys.exit(0)
-d = json.load(open(p))
+
+# Try both possible openclaw.json locations (root exec vs connected user)
+CANDIDATES = [
+    "/sandbox/.openclaw/openclaw.json",
+    "/sandbox/.openclaw-data/openclaw.json",
+    os.path.expanduser("~/.openclaw/openclaw.json"),
+]
+p = None
+for c in CANDIDATES:
+    if os.path.exists(c):
+        p = c
+        break
+
+if p is None:
+    # openclaw.json not yet created — write a minimal skeleton so the skill is
+    # enabled when openclaw first starts and creates its own config.
+    # Prefer the canonical path.
+    p = "/sandbox/.openclaw/openclaw.json"
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    d = {}
+    print(f"created skeleton at {p}", file=sys.stderr)
+else:
+    try:
+        d = json.load(open(p))
+    except Exception as e:
+        print(f"warning: could not parse {p}: {e} — resetting", file=sys.stderr)
+        d = {}
+
 changed = False
 
 entry = d.setdefault("skills", {}).setdefault("entries", {}).setdefault("haystack-rag-skills", {})
@@ -433,9 +500,9 @@ if tools.get("profile") != "coding":
 
 if changed:
     json.dump(d, open(p, "w"), indent=2)
-    print("updated")
+    print(f"updated ({p})")
 else:
-    print("already configured")
+    print(f"already configured ({p})")
 PYEOF
 }
 
@@ -474,11 +541,35 @@ fi
 SKILL_DEST="$(resolve_skill_dest)"
 ok "Skill path: $SKILL_DEST"
 
+# Boot openclaw once so it initializes openclaw.json, then patch it.
+# openclaw writes its default config on first start — we must let it do that
+# before we add the skill entry, otherwise our skeleton gets overwritten.
+info "Booting OpenClaw in sandbox to initialise openclaw.json..."
+openshell sandbox exec -n "$SANDBOX_NAME" -- \
+  bash -c "openclaw gateway run --once 2>/dev/null & sleep 4; kill %1 2>/dev/null; true" \
+  2>/dev/null || true
+
 info "Enabling skill in OpenClaw registry..."
-if enable_haystack_skill_registry 2>/dev/null | grep -qE 'updated|already configured'; then
-  ok "haystack-rag-skills enabled in openclaw.json (tools.profile=coding)"
-else
-  warn "Could not update openclaw.json — add skills.entries.haystack-rag-skills.enabled=true manually"
+ENABLE_ATTEMPTS=0
+ENABLE_OK=false
+while [ "$ENABLE_ATTEMPTS" -lt 5 ]; do
+  RESULT=$(enable_haystack_skill_registry 2>/dev/null || true)
+  if echo "$RESULT" | grep -qE 'updated|already configured'; then
+    ok "haystack-rag-skills enabled in openclaw.json (tools.profile=coding)"
+    ENABLE_OK=true
+    break
+  fi
+  ENABLE_ATTEMPTS=$((ENABLE_ATTEMPTS + 1))
+  warn "Enable attempt $ENABLE_ATTEMPTS/5 — openclaw.json not ready yet, retrying in 2s..."
+  sleep 2
+done
+if [ "$ENABLE_OK" = false ]; then
+  warn "Could not update openclaw.json after 5 attempts."
+  warn "Run manually on the host after connecting to the sandbox:"
+  warn "  openshell sandbox exec -n $SANDBOX_NAME -- python3 -c \""
+  warn "    import json; p='/sandbox/.openclaw/openclaw.json';"
+  warn "    d=json.load(open(p)); d.setdefault('skills',{}).setdefault('entries',{})['haystack-rag-skills']={'enabled':True};"
+  warn "    json.dump(d,open(p,'w'))\""
 fi
 
 info "Restarting OpenClaw gateway inside sandbox (reload skills)..."
@@ -500,16 +591,72 @@ openshell sandbox exec -n "$SANDBOX_NAME" -- \
   python3 -m venv "$SKILL_VENV" \
   || fail "Failed to create skill venv at $SKILL_VENV inside sandbox '$SANDBOX_NAME'."
 
+# pip lives at bin/pip regardless of python version; use it directly
 openshell sandbox exec -n "$SANDBOX_NAME" -- \
   "$SKILL_VENV/bin/pip" install -q requests \
   || fail "pip install of requests failed inside the skill venv."
 
+# Detect whichever python3.x binary the venv created (3.11, 3.12, etc.)
+VENV_PY=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
+  sh -c "ls $SKILL_VENV/bin/python3* 2>/dev/null | head -1" || true)
+[ -z "$VENV_PY" ] && VENV_PY="$SKILL_VENV/bin/python3"
+
 # Verify
 VENV_CHECK=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
-  "$SKILL_VENV/bin/python3" -c "import requests; print('ok')" 2>/dev/null || true)
+  "$VENV_PY" -c "import requests; print('ok')" 2>/dev/null || true)
 [ "$VENV_CHECK" = "ok" ] \
-  && ok "Skill venv ready ($SKILL_VENV)" \
-  || fail "Skill venv verification failed — 'import requests' returned no output."
+  && ok "Skill venv ready ($SKILL_VENV, python: $VENV_PY)" \
+  || fail "Skill venv verification failed — 'import requests' returned no output (tried $VENV_PY)."
+
+ok "Skill venv configured"
+echo ""
+
+# ── Step 12b: Patch sandbox openclaw.json with runtime INFERENCE_MODEL ──────
+# nemoclaw onboard bakes the ONBOARD_MODEL into the sandbox image. Patch it
+# here to the real INFERENCE_MODEL so the agent inside uses the right model.
+if [ "$NEMOCLAW_ONBOARD_MODEL" != "$INFERENCE_MODEL" ]; then
+  info "Patching sandbox model: $NEMOCLAW_ONBOARD_MODEL → $INFERENCE_MODEL ..."
+  openshell sandbox exec -n "$SANDBOX_NAME" -- python3 - <<PYEOF
+import json, os, sys
+
+candidates = [
+    "/sandbox/.openclaw/openclaw.json",
+    "/sandbox/.openclaw-data/openclaw.json",
+]
+p = next((c for c in candidates if os.path.exists(c)), None)
+if not p:
+    print("WARNING: openclaw.json not found, skipping model patch", file=sys.stderr)
+    sys.exit(0)
+
+d = json.load(open(p))
+model_ref = "inference/$INFERENCE_MODEL"
+
+# Primary model path used by OpenClaw/NemoClaw
+agents = d.setdefault("agents", {})
+defaults = agents.setdefault("defaults", {})
+model_cfg = defaults.setdefault("model", {})
+old = model_cfg.get("primary", "(not set)")
+model_cfg["primary"] = model_ref
+
+# Also update top-level model reference if present
+if "model" in d and isinstance(d["model"], dict):
+    d["model"]["primary"] = model_ref
+
+json.dump(d, open(p, "w"), indent=2)
+print(f"Patched {p}: {old} -> {model_ref}")
+PYEOF
+  if [ $? -eq 0 ]; then
+    ok "Sandbox model patched to $INFERENCE_MODEL"
+  else
+    warn "Model patch may not have applied — agent may still use $NEMOCLAW_ONBOARD_MODEL"
+  fi
+else
+  ok "Onboard model matches runtime model ($INFERENCE_MODEL) — no patch needed"
+fi
+
+info "Restarting OpenClaw in sandbox to pick up model change..."
+restart_sandbox_openclaw 2>/dev/null && sleep 2 || true
+echo ""
 
 ok "Skill and inference model are configured — reconnect to activate them"
 echo ""

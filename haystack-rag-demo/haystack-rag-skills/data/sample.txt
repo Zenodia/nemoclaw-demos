@@ -1,0 +1,107 @@
+Haystack by deepset — Introduction
+====================================
+
+Haystack is an open-source Python framework for building production-ready AI applications,
+search systems, and question-answering (QA) pipelines. It is developed and maintained by
+deepset, an AI company founded in 2018 and headquartered in Berlin, Germany.
+
+## What is Haystack?
+
+Haystack lets developers compose modular "components" — such as document converters, text
+splitters, embedding models, vector stores, retrievers, and LLM generators — into end-to-end
+pipelines. The framework handles both the indexing stage (turning raw files into searchable
+vectors) and the query stage (retrieving relevant chunks and generating grounded answers).
+
+Haystack 2.x introduced a fully revamped pipeline API where each component declares its
+inputs and outputs, making pipelines composable and inspectable. Pipelines are directed
+acyclic graphs (DAGs) and can be serialised to YAML for reproducibility.
+
+## Key Concepts
+
+### Components
+A Component is the fundamental building block. Examples:
+- **FileTypeRouter** — routes files by MIME type to the right converter
+- **PyPDFToDocument / TextFileToDocument** — convert raw files to Haystack Document objects
+- **DocumentCleaner** — removes whitespace, headers, boilerplate
+- **DocumentSplitter** — splits documents into overlapping chunks for retrieval
+- **DocumentEmbedder / TextEmbedder** — compute dense vector embeddings
+- **InMemoryDocumentStore / OpenSearchDocumentStore** — store documents and their embeddings
+- **InMemoryEmbeddingRetriever** — cosine-similarity search over stored embeddings
+- **ChatPromptBuilder** — fills a Jinja2 prompt template with retrieved context
+- **NvidiaChatGenerator / OpenAIChatGenerator** — call an LLM to generate an answer
+
+### Pipelines
+Components are wired into Pipelines. Two canonical pipelines:
+
+1. **Indexing pipeline** — reads files → cleans → splits → embeds → writes to store
+2. **RAG query pipeline** — embeds query → retrieves top-k chunks → fills prompt → LLM generates answer
+
+### Document Stores
+Haystack supports multiple backends: InMemory (for prototyping), Chroma, Qdrant, Weaviate,
+OpenSearch, Elasticsearch, pgvector, and more via the `haystack-integrations` ecosystem.
+
+### NVIDIA NIM Integration (`nvidia-haystack`)
+The `nvidia-haystack` package provides:
+- **NvidiaDocumentEmbedder** — batch-embed documents using NVIDIA NIM embedding endpoints
+- **NvidiaTextEmbedder** — embed a single query string
+- **NvidiaChatGenerator** — call NVIDIA NIM chat completion endpoints (LLaMA, Nemotron, Mixtral, etc.)
+
+These integrate with `integrate.api.nvidia.com/v1` and accept an `NVIDIA_API_KEY`.
+
+## deepset
+
+deepset is the company behind Haystack. They also offer **deepset Cloud**, a managed platform
+for deploying and monitoring Haystack pipelines at scale. The deepset team actively maintains
+the `haystack-ai` PyPI package and the `haystack-integrations` collection of third-party connectors.
+
+## Retrieval-Augmented Generation (RAG)
+
+RAG is the pattern where:
+1. Documents are pre-indexed into a vector store (embedding each chunk with a dense model)
+2. At query time the user's question is embedded, the top-k most similar chunks are retrieved
+3. Those chunks are injected as context into an LLM prompt
+4. The LLM generates a grounded, cited answer
+
+Haystack makes RAG easy to implement and extend. A minimal RAG demo runs in under 50 lines
+of Python using `InMemoryDocumentStore`, `NvidiaDocumentEmbedder`, `InMemoryEmbeddingRetriever`,
+`ChatPromptBuilder`, and `NvidiaChatGenerator`.
+
+## Installation
+
+pip install haystack-ai nvidia-haystack
+
+For PDF support:
+pip install pypdf
+
+## Quick Example
+
+from haystack import Pipeline
+from haystack.components.retrievers.in_memory import InMemoryEmbeddingRetriever
+from haystack.document_stores.in_memory import InMemoryDocumentStore
+from haystack_integrations.components.embedders.nvidia import (
+    NvidiaDocumentEmbedder, NvidiaTextEmbedder
+)
+from haystack_integrations.components.generators.nvidia import NvidiaChatGenerator
+
+store = InMemoryDocumentStore(embedding_similarity_function="cosine")
+# ... (index documents into store) ...
+
+pipeline = Pipeline()
+pipeline.add_component("embedder", NvidiaTextEmbedder(model="nvidia/nv-embedqa-e5-v5"))
+pipeline.add_component("retriever", InMemoryEmbeddingRetriever(document_store=store, top_k=5))
+pipeline.add_component("llm", NvidiaChatGenerator(model="nvidia/llama-3.3-nemotron-super-49b-v1.5"))
+# ... wire and run ...
+
+## This Demo
+
+In this NemoClaw demo, `haystack_rag_server.py` runs on the host machine with the
+NVIDIA_API_KEY. The sandbox skill (`haystack_client.py`) is a thin HTTP client that calls
+the server at http://host.openshell.internal:9004. The sandbox never touches the API key;
+all embedding and generation happens on the host side.
+
+Ask questions like:
+- "What is Haystack?"
+- "How does RAG work in Haystack?"
+- "What is deepset?"
+- "How do I install Haystack?"
+- "What embedding models does NVIDIA NIM support?"

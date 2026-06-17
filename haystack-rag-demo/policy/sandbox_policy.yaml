@@ -45,9 +45,11 @@ network_policies:
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.11" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.12" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.11" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.12" }
   nvidia:
     name: nvidia
     endpoints:
@@ -123,7 +125,11 @@ network_policies:
       - { path: "/sandbox/.uv/python/**" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.11" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.12" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/pip" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.11" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.12" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/pip" }

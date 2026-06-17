@@ -10,6 +10,7 @@ No MCP protocol — plain JSON REST over HTTP.
 
 Endpoints:
   GET  /health              — liveness check + indexed chunk count
+  POST /setup               — index the bundled sample document (first-use bootstrap)
   POST /index               — embed + store documents from a directory
   POST /query               — RAG query → grounded answer
   GET  /documents           — list indexed sources + chunk counts
@@ -26,6 +27,8 @@ from typing import Optional
 from dotenv import load_dotenv
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
+# Built-in sample document shipped alongside the server
+_SKILL_SAMPLE_DIR = _SCRIPT_DIR / "haystack-rag-skills" / "data"
 load_dotenv(_SCRIPT_DIR / ".env")
 
 # ── FastAPI ──────────────────────────────────────────────────────────────────
@@ -143,6 +146,26 @@ def health():
         store = _get_store()
         n = len(store.filter_documents())
     return {"status": "ok", "indexed_chunks": n, "store_path": _store_path}
+
+
+@app.post("/setup")
+def setup_sample():
+    """Index the bundled sample document (Haystack/deepset intro). Safe to call repeatedly."""
+    if not _SKILL_SAMPLE_DIR.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Built-in sample directory not found: {_SKILL_SAMPLE_DIR}. "
+                   f"Re-install the skill or re-run install.sh.",
+        )
+    sample_files = list(_SKILL_SAMPLE_DIR.glob("*.txt")) + list(_SKILL_SAMPLE_DIR.glob("*.md"))
+    if not sample_files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No .txt or .md files found in {_SKILL_SAMPLE_DIR}.",
+        )
+    # Delegate to the shared indexing logic.
+    req = IndexRequest(data_dir=str(_SKILL_SAMPLE_DIR))
+    return index_documents(req)
 
 
 @app.post("/index")
