@@ -1,0 +1,8 @@
+# Local configuration — contains NVIDIA_API_KEY, never commit
+.env
+
+# Host-side Python virtualenv created by install.sh
+.venv/
+
+# Auto-created document index
+data/store.json

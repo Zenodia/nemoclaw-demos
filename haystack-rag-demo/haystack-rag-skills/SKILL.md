@@ -2,77 +2,77 @@
 name: haystack-rag-skills
 description: >-
   Answer questions about Haystack, deepset, RAG pipelines, and indexed documents
-  using a Haystack RAG server running on the host. Auto-indexes a built-in sample
-  document about Haystack on first use. Triggers on questions about haystack,
-  deepset, RAG, retrieval-augmented generation, document search, knowledge base,
-  pdf indexing, embeddings, vector search, or what is haystack. Also handles
-  indexing documents, listing indexed files, and answering from a knowledge base.
+  using a Haystack RAG server running on the host. Handles indexing documents,
+  listing indexed files, checking the knowledge base, and answering questions
+  grounded in indexed docs. Triggers on questions about haystack, deepset, RAG,
+  retrieval-augmented generation, document search, knowledge base, pdf indexing,
+  embeddings, vector search, "what is haystack", "index my documents", or "what
+  documents are indexed". HOW TO RUN: there is NO callable tool named
+  haystack-rag-skills — instead run its Python client through the shell exec tool
+  from inside tool_search_code, e.g. await openclaw.tools.call('openclaw:core:exec',
+  { command: '/sandbox/.openclaw/workspace/skills/haystack-rag-skills/venv/bin/python3
+  /sandbox/.openclaw/workspace/skills/haystack-rag-skills/scripts/haystack_client.py index' }).
 ---
 
 # Haystack RAG Skills
 
-## How to invoke this skill
+## How to run this skill (REQUIRED — read first)
 
-**Always use the shell/bash execution tool** to run these commands. Do NOT use
-JavaScript code execution tools — this skill works via shell commands only.
+Your only execution tool is **`tool_search_code`**, which runs JavaScript. There is
+**no** tool named `haystack-rag-skills` and **no** `indexDocuments` method — do not
+call `openclaw.tools.call('haystack-rag-skills', ...)`.
 
-### Step 1 — Resolve paths (run this shell script first)
+To perform any operation, run the skill's Python client through the built-in shell
+exec tool (`openclaw:core:exec`) from inside `tool_search_code`:
 
-Run the following as a single shell command using the bash/terminal tool:
-
-```sh
-for _c in /sandbox/.openclaw/workspace/skills/haystack-rag-skills /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills "$HOME/.openclaw/workspace/skills/haystack-rag-skills"; do [ -d "$_c" ] && echo "SKILL_DIR=$_c" && break; done
+```js
+const D = '/sandbox/.openclaw/workspace/skills/haystack-rag-skills';
+return await openclaw.tools.call('openclaw:core:exec', {
+  command: `${D}/venv/bin/python3 ${D}/scripts/haystack_client.py <COMMAND>`
+});
 ```
 
-Take the `SKILL_DIR=...` value from the output and use it in the commands below.
+Replace `<COMMAND>` with exactly one of: `index`, `query --question "..."`,
+`list-documents`, `health`, or `setup`. After it runs, report the command's stdout
+to the user.
 
-### Step 2 — Run the skill command
+## Commands
 
-Replace `$SKILL_DIR` with the path found above and run via the bash/terminal tool:
+| User intent | `<COMMAND>` |
+|---|---|
+| "Index my documents" / "embed my files" | `index` |
+| Answer a question grounded in the docs | `query --question "THE QUESTION"` |
+| "What documents are indexed?" | `list-documents` |
+| Check server liveness + chunk count | `health` |
+| First use / 0 chunks: index bundled sample | `setup` |
 
-**Check server + chunk count:**
-```sh
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py health
+### Example — "Index my documents"
+
+```js
+const D = '/sandbox/.openclaw/workspace/skills/haystack-rag-skills';
+return await openclaw.tools.call('openclaw:core:exec', {
+  command: `${D}/venv/bin/python3 ${D}/scripts/haystack_client.py index`
+});
 ```
 
-**Index the built-in Haystack sample document (run on first use or when 0 chunks):**
-```sh
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py setup
+### Example — answer "What is Haystack?"
+
+```js
+const D = '/sandbox/.openclaw/workspace/skills/haystack-rag-skills';
+return await openclaw.tools.call('openclaw:core:exec', {
+  command: `${D}/venv/bin/python3 ${D}/scripts/haystack_client.py query --question "What is Haystack?"`
+});
 ```
 
-**Answer a question using RAG:**
-```sh
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py query --question "QUESTION_HERE"
-```
-
-**Index documents from the server's data directory:**
-```sh
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py index
-```
-
-**List indexed files:**
-```sh
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py list-documents
-```
-
-## Complete flow for any question about Haystack or documents
-
-Run these three shell commands in order using the bash/terminal tool:
-
-```sh
-# 1. Find SKILL_DIR
-for _c in /sandbox/.openclaw/workspace/skills/haystack-rag-skills /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills "$HOME/.openclaw/workspace/skills/haystack-rag-skills"; do [ -d "$_c" ] && SKILL_DIR="$_c" && break; done
-
-# 2. Index sample doc if nothing indexed yet
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py health | grep -q '"indexed_chunks": 0' && $SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py setup || true
-
-# 3. Query
-$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py query --question "REPLACE_WITH_USER_QUESTION"
-```
+(For a different question, replace the text inside the double quotes; escape any
+double quotes inside the question.)
 
 ## Notes
 
-- The server runs on the **host**, not in the sandbox — the skill is a thin HTTP client.
-- Always use `$SKILL_DIR/venv/bin/python3` (the skill venv), never bare `python3`.
-- If connection fails, check: `curl http://host.openshell.internal:9004/health`
-- Server URL default: `http://host.openshell.internal:9004`
+- The server runs on the **host** (port 9004); this skill is a thin HTTP client.
+  No NVIDIA API key is needed in the sandbox — all inference happens on the host.
+- Always invoke `${D}/venv/bin/python3` — the sandbox network policy only permits
+  that binary (and the host python) to reach the server on port 9004.
+- A harmless `OOM score adjust: Permission denied` line may appear in stderr; ignore it.
+- If a command reports it cannot connect, check the host server:
+  `curl http://host.openshell.internal:9004/health`

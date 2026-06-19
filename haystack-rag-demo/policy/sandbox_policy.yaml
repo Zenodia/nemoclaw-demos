@@ -28,8 +28,15 @@ network_policies:
     endpoints:
       - host: host.openshell.internal
         port: 9004
+        # Docker bridge gateway as seen INSIDE the sandbox. The egress proxy
+        # blocks "internal address" destinations unless the resolved IP is
+        # explicitly allowed. The value varies by Docker network: 172.17.0.1
+        # (default bridge), 172.18.0.1+ (compose/custom networks). install.sh
+        # resolves it dynamically; these cover the common cases for a static
+        # `openshell policy set`.
         allowed_ips:
           - 172.17.0.1
+          - 172.18.0.1
       - host: 127.0.0.1
         port: 9004
     binaries:
@@ -39,6 +46,13 @@ network_policies:
       - { path: /usr/bin/curl }
       - { path: /usr/bin/python3 }
       - { path: /usr/bin/python3.11 }
+      - { path: /usr/bin/python3.12 }
+      # The policy engine matches the RESOLVED binary path. A venv's python3
+      # typically symlinks to /usr/bin/python3.NN, so the skill venv python is
+      # denied unless the concrete interpreter version is listed. Keep in step
+      # with the sandbox image's Python (3.13 on current images).
+      - { path: /usr/bin/python3.13 }
+      - { path: /usr/bin/python3.14 }
       - { path: /sandbox/.venv/bin/python }
       - { path: /sandbox/.venv/bin/python3 }
       - { path: "/sandbox/.uv/python/**" }
@@ -46,10 +60,14 @@ network_policies:
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.11" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.12" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.13" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.14" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.11" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.12" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.13" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.14" }
   nvidia:
     name: nvidia
     endpoints:
@@ -115,6 +133,9 @@ network_policies:
     binaries:
       - { path: /usr/bin/python3 }
       - { path: /usr/bin/python3.11 }
+      - { path: /usr/bin/python3.12 }
+      - { path: /usr/bin/python3.13 }
+      - { path: /usr/bin/python3.14 }
       - { path: /sandbox/.venv/bin/python }
       - { path: /sandbox/.venv/bin/python3 }
       - { path: /sandbox/.venv/bin/pip }
@@ -127,9 +148,13 @@ network_policies:
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.11" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.12" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.13" }
+      - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3.14" }
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/pip" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.11" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.12" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.13" }
+      - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3.14" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/pip" }
