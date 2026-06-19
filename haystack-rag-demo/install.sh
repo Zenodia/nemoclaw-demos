@@ -414,24 +414,46 @@ os.chmod(path, 0o600)
 " 2>/dev/null || true
 
 # ── Step 10: Apply sandbox network policy ───────────────────────
-# We use the minimal egress-only YAML (no filesystem_policy section) so we
-# don't conflict with filesystem rules added by nemoclaw onboard presets.
-# Try nemoclaw policy-add first (additive, won't touch filesystem rules);
-# fall back to openshell policy set if nemoclaw policy-add isn't available.
+# The skill (haystack_client.py) must reach the host RAG server on $RAG_PORT.
+# Two gotchas handled here:
+#   1. The egress proxy blocks "internal address" destinations unless the
+#      resolved Docker bridge IP is explicitly allowed. That IP varies
+#      (172.17.0.1 default bridge, 172.18.0.1+ for compose/custom networks),
+#      so we resolve it dynamically inside the sandbox.
+#   2. The policy engine matches the RESOLVED binary path; a venv's python3
+#      symlinks to /usr/bin/python3.NN, so the concrete interpreter versions
+#      must be allowlisted (3.13 on current images).
 EGRESS_POLICY="$SCRIPT_DIR/policy/haystack-rag-egress.yaml"
 info "Applying haystack_rag_host egress policy (port $RAG_PORT)..."
 POLICY_OK=false
 
-if nemoclaw "$SANDBOX_NAME" policy-add --policy "$EGRESS_POLICY" 2>/dev/null; then
-  ok "Policy applied via nemoclaw policy-add (haystack_rag_host egress on port $RAG_PORT)"
+HOST_BRIDGE_IP=$(openshell sandbox exec -n "$SANDBOX_NAME" -- \
+  getent hosts host.openshell.internal 2>/dev/null | awk '{print $1}' | head -1)
+[ -z "$HOST_BRIDGE_IP" ] && HOST_BRIDGE_IP="172.17.0.1"
+info "host.openshell.internal resolves to $HOST_BRIDGE_IP inside the sandbox"
+
+# Preferred: incremental update. Works on LIVE sandboxes because it does not
+# touch the filesystem_policy (openshell policy set refuses to remove it on a
+# live sandbox). Binary-scoped to the skill venv python(s) + system python.
+if openshell policy update "$SANDBOX_NAME" \
+     --add-endpoint "host.openshell.internal:$RAG_PORT:full:::allowed-ip=$HOST_BRIDGE_IP" \
+     --binary "/usr/bin/python3" \
+     --binary "/usr/bin/python3.11" \
+     --binary "/usr/bin/python3.12" \
+     --binary "/usr/bin/python3.13" \
+     --binary "/usr/bin/python3.14" \
+     --binary "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" \
+     --binary "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" \
+     --rule-name haystack_rag_host --wait 2>/dev/null; then
+  ok "Policy applied via openshell policy update (egress on port $RAG_PORT, ip $HOST_BRIDGE_IP)"
   POLICY_OK=true
-elif openshell policy set "$SANDBOX_NAME" \
-     --policy "$EGRESS_POLICY" \
-     --wait 2>/dev/null; then
-  ok "Policy applied via openshell policy set (haystack_rag_host egress on port $RAG_PORT)"
+elif openshell policy set "$SANDBOX_NAME" --policy "$EGRESS_POLICY" --wait 2>/dev/null; then
+  # Full replacement of network_policies. Fails on live sandboxes that carry a
+  # filesystem_policy (cannot be removed live) — works on fresh sandboxes.
+  ok "Policy applied via openshell policy set (egress-only)"
   POLICY_OK=true
 else
-  # Last resort: try the full policy file (may fail on live sandboxes with filesystem rules)
+  # Last resort: the full policy file (may fail on live sandboxes with filesystem rules)
   openshell policy set "$SANDBOX_NAME" \
     --policy "$SCRIPT_DIR/policy/sandbox_policy.yaml" \
     --wait 2>/dev/null \
@@ -443,7 +465,10 @@ fi
 if [ "$POLICY_OK" = false ]; then
   warn "Could not apply egress policy — egress to port $RAG_PORT may be blocked."
   warn "To fix manually, run:"
-  warn "  nemoclaw $SANDBOX_NAME policy-add --policy $EGRESS_POLICY"
+  warn "  openshell policy update $SANDBOX_NAME \\"
+  warn "    --add-endpoint host.openshell.internal:$RAG_PORT:full:::allowed-ip=$HOST_BRIDGE_IP \\"
+  warn "    --binary '/sandbox/.openclaw/workspace/skills/*/venv/bin/python3' \\"
+  warn "    --binary /usr/bin/python3.13 --rule-name haystack_rag_host --wait"
 fi
 echo ""
 
@@ -524,18 +549,24 @@ resolve_skill_dest() {
 }
 
 info "Installing $SKILL_NAME in sandbox..."
-if nemoclaw "$SANDBOX_NAME" skill install "$SKILL_SRC"; then
-  ok "Skill registered via nemoclaw skill install"
-else
-  warn "nemoclaw skill install failed — falling back to openshell upload"
-  openshell sandbox upload "$SANDBOX_NAME" \
-    "$SKILL_SRC" \
-    "$SKILL_DEST" \
-    || openshell sandbox upload "$SANDBOX_NAME" \
-      "$SKILL_SRC" \
-      "$SKILL_DEST_LEGACY" \
-      || fail "Skill upload failed on both $SKILL_DEST and $SKILL_DEST_LEGACY"
-  ok "Skill uploaded (fallback path)"
+nemoclaw "$SANDBOX_NAME" skill install "$SKILL_SRC" 2>/dev/null \
+  && ok "Skill registered via nemoclaw skill install" \
+  || warn "nemoclaw skill install reported an error — will verify and fall back"
+
+# Verify the files actually landed where OpenClaw reads skills. On some
+# nemoclaw/openshell versions `nemoclaw skill install` reports success but the
+# files never appear at the workspace path (only the venv dir exists), leaving
+# the skill registered-but-empty. If SKILL.md is missing, upload the skill
+# DIRECTORY into the PARENT skills dir. NOTE: `openshell sandbox upload` places
+# basename(SRC) INTO the destination, so the destination must be the parent —
+# uploading to $SKILL_DEST itself nests haystack-rag-skills/haystack-rag-skills/.
+if ! openshell sandbox exec -n "$SANDBOX_NAME" -- test -f "$SKILL_DEST/SKILL.md" 2>/dev/null \
+   && ! openshell sandbox exec -n "$SANDBOX_NAME" -- test -f "$SKILL_DEST_LEGACY/SKILL.md" 2>/dev/null; then
+  warn "Skill files not present in sandbox after install — uploading directly"
+  openshell sandbox upload "$SANDBOX_NAME" "$SKILL_SRC" "$(dirname "$SKILL_DEST")" \
+    || openshell sandbox upload "$SANDBOX_NAME" "$SKILL_SRC" "$(dirname "$SKILL_DEST_LEGACY")" \
+    || fail "Skill upload failed to $(dirname "$SKILL_DEST")"
+  ok "Skill uploaded to $(dirname "$SKILL_DEST")"
 fi
 
 SKILL_DEST="$(resolve_skill_dest)"

@@ -384,6 +384,8 @@ Then disconnect and reconnect the sandbox TUI.
 | `[Errno 98] address already in use` on port 9004 | Kill the stale process: `kill $(lsof -t -i:9004)` then restart. `install.sh` does this automatically. |
 | Agent doesn't find `haystack-rag-skills` | Reinstall: `nemoclaw <sandbox> skill install haystack-rag-skills/`. Disconnect and reconnect the TUI. Verify: `openshell sandbox exec -n <sandbox> -- test -f /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md && echo ok` |
 | Skill uploaded but not in agent's skill list | OpenClaw 2026.5+ requires registry entry. Re-run `install.sh` (enables `skills.entries.haystack-rag-skills` in `openclaw.json`) or run `nemoclaw skill install`. |
+| `nemoclaw skill install` says success but agent has no skill body | On some versions the files don't land at the workspace path (only `venv/` is there), leaving the skill registered-but-empty. Re-upload the skill DIRECTORY into the **parent** skills dir: `openshell sandbox upload <sandbox> haystack-rag-skills /sandbox/.openclaw/workspace/skills` — uploading to the skill dir itself nests `haystack-rag-skills/haystack-rag-skills/`. |
+| `not permitted by policy` / `blocked: internal address` from the skill | Two causes: the venv python resolves to `/usr/bin/python3.NN` (must be allowlisted — 3.13 on current images), and `host.openshell.internal`'s Docker bridge IP must be in `allowed_ips`. On a live sandbox apply incrementally (preserves filesystem policy): `openshell policy update <sandbox> --add-endpoint host.openshell.internal:9004:full:::allowed-ip=<bridge-ip> --binary '/sandbox/.openclaw/workspace/skills/*/venv/bin/python3' --binary /usr/bin/python3.13 --rule-name haystack_rag_host --wait`. Find the bridge IP with `openshell sandbox exec -n <sandbox> -- getent hosts host.openshell.internal`. |
 | RAG server not responding | Check logs: `tail -50 /tmp/haystack-rag.log`. Health check: `curl http://127.0.0.1:9004/health` |
 | `Connection refused` / port 9004 from sandbox | Server not running, or sandbox policy not applied. Re-run `install.sh`. If policy failed on a live sandbox, see [Full environment reset](#full-environment-reset). |
 | `l7_decision=deny` / 403 in OpenShell logs | Policy not applied or binary path not listed. Re-run: `openshell policy set <sandbox> --policy policy/sandbox_policy.yaml --wait` |
@@ -394,6 +396,37 @@ Then disconnect and reconnect the sandbox TUI.
 | Wrong inference model in TUI | `openshell inference set --provider nvidia --model nvidia/llama-3.3-nemotron-super-49b-v1.5` then reconnect. |
 | `openclaw: command not found` | If using nvm: `export PATH="$(dirname $(find ~/.nvm -name openclaw -type f 2>/dev/null \| head -1)):$PATH"` |
 | WebUI token not found | Token is at `.gateway.auth.token` in `~/.openclaw/openclaw.json` (see Step 3 / WebUI section). |
+
+### Agent won't run the skill (model & session)
+
+The skill can be installed, registered, and reachable and the agent *still*
+refuses to use it. Causes, in order of likelihood:
+
+1. **Use a Nemotron-3 agent model.** OpenClaw exposes tools through a
+   tool-search / code-execution surface (`openclaw.tools.search/describe/call`,
+   invoked as `tool_search_code`) rather than as plain bash. Llama-based models —
+   `nvidia/llama-3.3-nemotron-super-49b`, `meta/llama-3.3-70b-instruct`,
+   `nvidia/llama-3.1-nemotron-70b-instruct` — mishandle it: they refuse
+   ("restricted access"), claim only `tool_search_code` is available, or misfire
+   (e.g. create a cron job) instead of running the skill. **Nemotron-3** models
+   drive it reliably. Set `INFERENCE_MODEL=nvidia/nemotron-3-super-120b-a12b` in
+   `.env`, then `openshell inference update --model nvidia/nemotron-3-super-120b-a12b`
+   and reconnect. (There is no Nemotron-3 between 30B and 120B; the 120B is the
+   practical floor for reliable tool use here. The model navigates the skill via
+   `await openclaw.tools.call('openclaw:core:exec', { command: '...' })` — see
+   `haystack-rag-skills/SKILL.md`.)
+
+2. **Start a fresh session.** A session that accumulated refusals (e.g. while on
+   a weaker model) stays "poisoned": the model reads its own past refusals and
+   keeps refusing, even after you switch models. Open a clean session —
+   `openclaw tui --session demo` (or `/new` in the TUI). Confirm the model in the
+   TUI status bar reads `inference/nvidia/nemotron-3-super-120b-a12b`.
+
+3. **Queries time out → use a fast RAG generation model.** `/query` runs answer
+   generation on the host. A *reasoning* model (nemotron-super / nemotron-ultra)
+   can emit a long reasoning trace and time out (~150s observed). Set
+   `NVIDIA_CHAT_MODEL=meta/llama-3.3-70b-instruct` (fast, non-reasoning) in `.env`
+   and restart the RAG server — queries return in ~3s.
 
 ### Full environment reset
 
