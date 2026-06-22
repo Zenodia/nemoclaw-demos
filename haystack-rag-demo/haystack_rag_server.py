@@ -3,8 +3,10 @@
 Haystack RAG HTTP server — host-side component.
 
 Runs outside the sandbox so it has access to NVIDIA_API_KEY.
-The sandbox skill (haystack_client.py) calls this server via
-http://host.openshell.internal:9004 to index documents and run queries.
+Listens on a non-loopback address (0.0.0.0) so the OpenShell gateway can reach
+it at the host's real IP. The sandbox skill (haystack_client.py) calls this
+server via http://<HOST_IP>:9004 (policy-controlled egress) to index documents
+and run queries — NOT via host.openshell.internal.
 
 No MCP protocol — plain JSON REST over HTTP.
 
@@ -355,7 +357,7 @@ def main() -> None:
     print(f"  Model  : {CHAT_MODEL}", flush=True)
     print(f"  Key    : {'set' if api_key else 'NOT SET'}", flush=True)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

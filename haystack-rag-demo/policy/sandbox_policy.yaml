@@ -22,16 +22,22 @@ network_policies:
       - path: /usr/bin/node
   haystack_rag_host:
     # Allows the sandbox skill (haystack_client.py) to reach the Haystack RAG
-    # server running on the host at port 9004. NVIDIA_API_KEY never enters the
-    # sandbox — all inference happens on the host side of this connection.
+    # server running on the host at port __RAG_PORT__. NVIDIA_API_KEY never
+    # enters the sandbox — all inference happens on the host side of this
+    # connection. __HOST_IP__ is rendered to the host's real, non-loopback IP
+    # by install.sh. Do NOT use host.openshell.internal here.
     name: haystack_rag_host
     endpoints:
-      - host: host.openshell.internal
-        port: 9004
-        allowed_ips:
-          - 172.17.0.1
-      - host: 127.0.0.1
-        port: 9004
+      - host: __HOST_IP__
+        port: __RAG_PORT__
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/health" }
+          - allow: { method: POST, path: "/setup" }
+          - allow: { method: POST, path: "/index" }
+          - allow: { method: POST, path: "/query" }
+          - allow: { method: GET,  path: "/documents" }
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/node }

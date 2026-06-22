@@ -20,10 +20,14 @@ Commands:
 Server URL (resolved in order):
   1. --server-url flag
   2. RAG_SERVER_URL env var
-  3. Default: http://host.openshell.internal:9004
+  3. <skill_dir>/server_url.txt   (written by install.sh — the host's real IP)
+  4. Default: http://127.0.0.1:9004 (host-local fallback only)
 
-Always run with the skill venv's Python so the sandbox policy allows the
-outbound connection to port 9004. Do NOT use bare python3.
+The host IP is used directly (e.g. http://10.0.0.5:9004) — NOT
+host.openshell.internal, which is not a reliable host-service path inside the
+OpenShell sandbox network. Always run with the skill venv's Python so the
+sandbox policy allows the outbound connection to port 9004. Do NOT use bare
+python3.
 """
 from __future__ import annotations
 
@@ -48,7 +52,24 @@ except ImportError as e:
     )
     sys.exit(1)
 
-_DEFAULT_URL = "http://host.openshell.internal:9004"
+_FALLBACK_URL = "http://127.0.0.1:9004"
+
+
+def _resolve_default_url() -> str:
+    """Resolve the server URL from env, then the install-time server_url.txt."""
+    env_url = os.environ.get("RAG_SERVER_URL")
+    if env_url:
+        return env_url
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = os.path.join(skill_dir, "server_url.txt")
+    try:
+        with open(cfg) as f:
+            url = f.read().strip()
+            if url:
+                return url
+    except OSError:
+        pass
+    return _FALLBACK_URL
 
 
 def _call(server_url: str, method: str, path: str, payload: dict | None = None) -> dict:
@@ -63,8 +84,10 @@ def _call(server_url: str, method: str, path: str, payload: dict | None = None) 
     except requests.exceptions.ConnectionError:
         print(
             f"Error: cannot connect to Haystack RAG server at {server_url}\n"
-            "Is the server running on the host? Check: curl http://host.openshell.internal:9004/health\n"
-            "Confirm the sandbox policy allows egress to port 9004.",
+            "Is the server running on the host? From the host, check:\n"
+            f"  curl {server_url}/health\n"
+            "Confirm the haystack_rag_host egress policy targets this host IP and port,\n"
+            "and that the server listens on a non-loopback address (0.0.0.0).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -88,8 +111,8 @@ def main() -> None:
     )
     root.add_argument(
         "--server-url",
-        default=os.environ.get("RAG_SERVER_URL", _DEFAULT_URL),
-        help="Base URL of the Haystack RAG server.",
+        default=_resolve_default_url(),
+        help="Base URL of the Haystack RAG server (host IP, e.g. http://10.0.0.5:9004).",
     )
 
     sub = root.add_subparsers(dest="command", metavar="<command>", required=True)

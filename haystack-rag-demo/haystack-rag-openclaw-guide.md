@@ -13,29 +13,38 @@ The setup has two components:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  HOST MACHINE                                                   │
+│  HOST MACHINE (default network namespace)                       │
 │                                                                 │
-│  haystack_rag_server.py  (FastAPI, port 9004)                   │
+│  haystack_rag_server.py  (FastAPI, 0.0.0.0:9004)               │
 │  ├── POST /index     ← embed + store documents via NVIDIA NIM   │
 │  ├── POST /query     ← retrieve + generate answer via NVIDIA    │
 │  ├── GET  /documents ← list indexed sources                     │
 │  └── GET  /health    ← liveness check                           │
 │                                                                 │
 │  NVIDIA_API_KEY lives here — never enters the sandbox           │
+│                                                                 │
+│  HOST BRIDGE  172.18.0.1  ← reachable from sandbox namespace   │
+│  (OpenShell sandbox bridge gateway — the address the sandbox    │
+│   proxy uses to make outbound forwarded connections)            │
 └────────────────────────────────┬────────────────────────────────┘
                                  │  HTTP only, port 9004
-                                 │  governed by sandbox_policy.yaml
+                                 │  governed by haystack-rag-egress.yaml
+                                 │  + host iptables INPUT ACCEPT rule
+                                 │  (see Troubleshooting → proxy timeout)
 ┌────────────────────────────────┴────────────────────────────────┐
-│  SANDBOX (OpenShell, managed by NemoClaw)                       │
+│  SANDBOX (OpenShell, Docker bridge 172.18.0.0/16)              │
 │                                                                 │
 │  haystack-rag-skills/scripts/haystack_client.py                 │
 │  └── calls server endpoints (index / query / list-documents)    │
-│      via requests — zero NVIDIA API calls from sandbox          │
+│      via requests through OpenShell proxy at 10.200.0.1:3128   │
+│      — zero NVIDIA API calls from sandbox                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 **Why a host-side server instead of running Haystack directly in the sandbox?**
 The OpenShell sandbox strips `NVIDIA_API_KEY` from the environment by design — it cannot call `integrate.api.nvidia.com` directly. The host-side `haystack_rag_server.py` holds the key and runs all NVIDIA API calls. The sandbox skill is a thin HTTP client that calls the host server through an egress-approved port. This mirrors how the PST demo uses an MCP server, but uses plain JSON REST instead of MCP.
+
+> **Network note:** The sandbox proxy (`openshell-sandbox`) runs in the Docker bridge network namespace (`172.18.0.0/16`), **not** the host's default network namespace. The host's primary external IP (e.g. `10.0.0.5`) is not routable from this namespace. The correct `HOST_IP` is the bridge gateway `172.18.0.1`. Additionally, a host iptables INPUT rule is required to allow sandbox container traffic to reach the server on port 9004. `install.sh` handles both automatically — see [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) if you hit this manually.
 
 ---
 
@@ -60,7 +69,7 @@ If NemoClaw is not yet installed, run:
 ```bash
 bash
 export NEMOCLAW_AGENT=openclaw
-export NEMOCLAW_INSTALL_TAG=v0.0.55
+export NEMOCLAW_INSTALL_TAG=v0.0.56
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 bash
 ```
 
@@ -69,7 +78,7 @@ This installs the `nemoclaw` and `openshell` CLIs and sets up the gateway binary
 Verify:
 
 ```bash
-nemoclaw --version    # e.g. nemoclaw v0.0.55
+nemoclaw --version    # e.g. nemoclaw v0.0.56
 openshell --version   # e.g. openshell 0.0.44
 ```
 
@@ -148,7 +157,8 @@ bash install.sh my-assistant
 13. **Enables the skill in OpenClaw's registry** — sets `skills.entries.haystack-rag-skills.enabled=true` and `tools.profile=coding` in `/sandbox/.openclaw/openclaw.json` so the agent can `exec` the skill scripts.
 14. **Restarts the OpenClaw gateway inside the sandbox** so it re-reads the skill registry.
 15. **Bootstraps the skill venv** inside the sandbox with only `requests`.
-16. **Verifies** server health, skill presence, and venv import.
+16. **Uploads `HEARTBEAT.md`** to `/sandbox/.openclaw/workspace/HEARTBEAT.md` via base64-pipe so the agent gets a periodic health check task and mandatory skill-routing reminder. An empty HEARTBEAT.md (the OpenClaw default) causes the agent to answer Haystack questions from general knowledge instead of running the skill.
+17. **Verifies** server health, skill presence, and venv import.
 
 > **After install:** Disconnect and reconnect the sandbox TUI so OpenClaw picks up the new skill (see [Step 5](#step-5--connect-and-try-it-out)).
 
@@ -285,6 +295,10 @@ $SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py <command> [arg
 
 Legacy sandboxes may use `/sandbox/.openclaw-data/workspace/skills/`. `nemoclaw skill install` picks the correct path automatically. Do **not** rely on a raw `openshell sandbox upload` to `.openclaw-data` — OpenClaw will not discover the skill unless it is registered in `openclaw.json`.
 
+> **If the agent answers Haystack questions from general knowledge instead of running the skill**, the `SKILL.md` routing language is not strong enough. The `description` frontmatter field (not just the body) must contain MANDATORY language and exec-ready commands — this is what the routing layer uses to decide whether to invoke the skill. See [Troubleshooting → Agent ignores skill](#agent-answers-from-general-knowledge-instead-of-running-the-skill) for the fix and the base64-pipe workaround for updating SKILL.md in a live sandbox without deleting and re-installing the skill.
+
+> **`openshell sandbox upload` cannot overwrite an existing file at the same path.** If you need to update SKILL.md or HEARTBEAT.md in place, use the base64-pipe method or delete the file first. See [Troubleshooting → Updating SKILL.md in place](#updating-skillmd-or-heartbeatmd-in-a-live-sandbox).
+
 **Command reference:**
 
 ```bash
@@ -292,14 +306,22 @@ Legacy sandboxes may use `/sandbox/.openclaw-data/workspace/skills/`. `nemoclaw 
 python3 haystack_client.py index
 
 # Ask a question (top-k chunks retrieved)
+# NOTE: "query" is a subcommand — --question is its argument, not a top-level flag.
+# Wrong: python3 haystack_client.py --question "..."
+# Right: python3 haystack_client.py query --question "..."
 python3 haystack_client.py query --question "What is the main topic?" --top-k 8
 
 # List all indexed sources
 python3 haystack_client.py list-documents
 
-# Custom server URL (default: http://host.openshell.internal:9004)
-python3 haystack_client.py --server-url http://127.0.0.1:9004 query --question "..."
+# Custom server URL. The default is read from <skill_dir>/server_url.txt, which
+# install.sh writes with the host's Docker bridge IP (172.18.0.1), the only host
+# address reachable from the sandbox network namespace (not 10.x.x.x).
+# Override with --server-url or the RAG_SERVER_URL env var.
+python3 haystack_client.py --server-url http://172.18.0.1:9004 query --question "..."
 ```
+
+> **Common syntax mistake:** `python3 haystack_client.py --question "..."` will fail with "unrecognized arguments". The `--question` flag belongs to the `query` subcommand, not the top-level parser. Always use `query --question "..."`. See [Troubleshooting → Wrong query subcommand syntax](#wrong-query-subcommand-syntax--question-is-not-a-top-level-flag) for details.
 
 See `haystack-rag-skills/SKILL.md` for the full argument reference.
 
@@ -322,19 +344,38 @@ The host server runs with full access to `NVIDIA_API_KEY`, the filesystem, and t
 
 ### Control 2 — `sandbox_policy.yaml` (network-level)
 
-The `haystack_rag_host` policy block opens outbound HTTP from the sandbox to port 9004 only, and only from the skill venv's Python binary:
+The `haystack_rag_host` policy block opens outbound HTTP from the sandbox to the
+host's Docker bridge gateway on port 9004 only, restricted to specific REST
+methods/paths and only from the skill venv's Python binary. `__HOST_IP__` is a
+placeholder that install.sh renders to `172.18.0.1` at apply time — **not**
+`10.x.x.x` or `host.openshell.internal`. The sandbox proxy runs in the Docker
+bridge namespace (`172.18.0.0/16`) and can only reach the bridge gateway:
 
 ```yaml
 network_policies:
   haystack_rag_host:
     endpoints:
-      - host: host.openshell.internal
+      - host: __HOST_IP__        # rendered to 172.18.0.1 (Docker bridge gateway)
         port: 9004
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/health" }
+          - allow: { method: POST, path: "/query" }
+          # ... (full list in policy/haystack-rag-egress.yaml)
     binaries:
       - { path: "/sandbox/.openclaw/workspace/skills/*/venv/bin/python3" }
       - { path: "/sandbox/.openclaw-data/workspace/skills/*/venv/bin/python3" }
       # ... (full list in policy/sandbox_policy.yaml)
 ```
+
+The preset is applied with the documented command:
+
+```bash
+nemoclaw <sandbox> policy-add --from-file ./policy/haystack-rag-egress.yaml
+```
+
+> **Important:** The OpenShell egress policy controls what the *sandbox* is allowed to request. It does **not** open the host's TCP port. The host iptables INPUT chain drops traffic from Docker containers by default — even if the OpenShell L7 engine marks the request `ALLOWED`, the TCP SYN is still dropped at the host. A second control is needed: an iptables ACCEPT rule for the Docker bridge network. `install.sh` adds this automatically via `docker run --privileged`. If you apply the policy manually without running the installer, you must also run: `sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT`. See [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) for the full diagnostic walkthrough.
 
 The `nvidia` policy block deliberately **does not** include the skill venv python binaries — skills cannot call NVIDIA directly even if they tried.
 
@@ -353,14 +394,19 @@ source .venv/bin/activate
 # Free port 9004 if a previous instance is still running
 kill $(lsof -t -i:9004) 2>/dev/null || true
 
-python haystack_rag_server.py
+# Use the absolute path — running via a relative path can fail if CWD drifts
+python "$(pwd)/haystack_rag_server.py"
 ```
+
+> **Stale install.sh processes:** If you ran `bash install.sh` multiple times, earlier invocations may still be alive (each has a background `while true` restart loop). Each loop kills the other's server via `lsof -t -i:9004`, causing a crash-restart race. Before restarting manually, kill all stale install.sh processes: `pkill -f "bash.*install.sh"`. See [Troubleshooting → Competing restart loops](#competing-restart-loops-from-stale-installsh-processes) for details.
 
 ### Restart via installer (recommended)
 
 Restarts the server, reapplies policy, reinstalls the skill, and refreshes the skill venv:
 
 ```bash
+# Kill all stale install.sh loops first to avoid process conflicts
+pkill -f "bash.*install.sh" 2>/dev/null || true
 kill $(cat /tmp/haystack-rag.pid) 2>/dev/null || true
 bash install.sh my-assistant
 ```
@@ -394,6 +440,13 @@ Then disconnect and reconnect the sandbox TUI.
 | Wrong inference model in TUI | `openshell inference set --provider nvidia --model nvidia/llama-3.3-nemotron-super-49b-v1.5` then reconnect. |
 | `openclaw: command not found` | If using nvm: `export PATH="$(dirname $(find ~/.nvm -name openclaw -type f 2>/dev/null \| head -1)):$PATH"` |
 | WebUI token not found | Token is at `.gateway.auth.token` in `~/.openclaw/openclaw.json` (see Step 3 / WebUI section). |
+| **`Read timed out (host='10.200.0.1', port=3128)`** — sandbox request hangs 120 s | Host iptables is dropping Docker bridge traffic. Apply: `sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT`. See [Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) for the full diagnostic. `install.sh` does this automatically. |
+| **Server unreachable from sandbox despite policy `ALLOWED`** — `10.x.x.x:9004` not routable | The sandbox proxy runs in the Docker bridge namespace; `10.x.x.x` host IPs are not routable from there. Use `172.18.0.1` as HOST_IP. `install.sh` resolves this automatically; if you applied the policy manually, re-render it with the correct IP. See [Wrong HOST_IP](#wrong-host_ip-host-primary-ip-is-not-routable-from-sandbox-namespace). |
+| **Competing restart loops / server crash-loop** after running install.sh twice | Multiple `bash install.sh` processes leave overlapping background restart loops alive. Each kills the other's server. Fix: `pkill -f "bash.*install.sh"` then `bash install.sh`. See [Competing restart loops](#competing-restart-loops-from-stale-installsh-processes). |
+| **`error: unrecognized arguments: --question`** from `haystack_client.py` | `--question` belongs to the `query` subcommand, not the top-level parser. Wrong: `haystack_client.py --question "..."`. Right: `haystack_client.py query --question "..."`. See [Wrong query syntax](#wrong-query-subcommand-syntax--question-is-not-a-top-level-flag). |
+| **Agent answers Haystack / RAG questions from general knowledge instead of running the skill** | SKILL.md description lacked mandatory-execution language. Re-install the skill with the updated SKILL.md (see [Agent ignores skill](#agent-answers-from-general-knowledge-instead-of-running-the-skill)). |
+| **`openshell sandbox upload` fails with "mkdir: cannot create directory ... File exists"** when updating an existing skill file | `upload` cannot overwrite a file that already exists at the destination. Use the base64 workaround to write in place. See [Updating SKILL.md in place](#updating-skillmd-or-heartbeatmd-in-a-live-sandbox). |
+| **HEARTBEAT.md is empty** — agent has no periodic reminder to use the skill | Populate `HEARTBEAT.md` in `/sandbox/.openclaw/workspace/` with a health check task and skill-routing reminder, then upload via `openshell sandbox upload`. See [Updating SKILL.md in place](#updating-skillmd-or-heartbeatmd-in-a-live-sandbox). |
 
 ### Full environment reset
 
@@ -421,12 +474,276 @@ bash install.sh
 
 ---
 
+### Proxy timeout: `Read timed out` at `10.200.0.1:3128`
+
+**Symptom:**
+
+Running any `haystack_client.py` command from the sandbox produces:
+
+```
+Unexpected error: HTTPConnectionPool(host='10.200.0.1', port=3128): Read timed out. (read timeout=120)
+```
+
+**What `10.200.0.1:3128` is — and why it times out:**
+
+`10.200.0.1:3128` is the OpenShell gateway's HTTP forward proxy inside the sandbox's user network namespace — **not** a corporate proxy. All sandbox HTTP traffic routes through it for L7 policy enforcement. When the sandbox makes a request to `http://172.18.0.1:9004`, the gateway inspects it, marks it `ALLOWED` (if the egress policy permits), and then makes an outbound TCP connection from the Docker bridge network namespace to `172.18.0.1:9004`.
+
+The timeout occurs because the host's iptables INPUT chain drops traffic arriving from Docker container source IPs (`172.18.0.0/16`), even for ports that have a running server. The OpenShell L7 engine allowing the request does **not** open the host's TCP port — these are independent controls. The gateway sends a TCP SYN, the host drops it silently (no RST), and after 120 s the client times out waiting.
+
+**How to confirm it's an iptables issue:**
+
+From the sandbox, hit a port that is definitely policy-denied:
+
+```bash
+openshell sandbox exec -n my-assistant -- curl --max-time 5 http://172.18.0.1:9005/
+# → immediate: {"error":"policy_denied"}
+```
+
+If port 9004 times out while port 9005 is instantly denied, the OpenShell proxy is responding — but the TCP connection to port 9004 is being silently dropped by the host, not by the proxy.
+
+**Fix:**
+
+```bash
+# Option 1 — if you have sudo on the host
+sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT
+
+# Option 2 — if the ubuntu user is in the docker group (no sudo needed)
+docker run --rm --privileged --network host alpine sh -c \
+  "apk add --quiet iptables && iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT"
+```
+
+Verify from the sandbox:
+
+```bash
+openshell sandbox exec -n my-assistant -- curl -s --max-time 10 http://172.18.0.1:9004/health
+# → {"status":"ok","indexed_chunks":0,...}
+```
+
+`install.sh` adds this iptables rule automatically (via the `docker run --privileged` method) so you normally never hit this manually. If you applied only the egress policy without running the installer, this is the missing step.
+
+---
+
+### Wrong HOST_IP: host primary IP is not routable from sandbox namespace
+
+**Symptom:**
+
+After `install.sh`, the `server_url.txt` file contains something like `http://10.0.0.5:9004` and sandbox requests either time out or return connection errors, even with a valid policy.
+
+**Root cause:**
+
+The openshell-sandbox proxy process runs in a Docker bridge network namespace (`172.18.0.0/16`). When it makes outbound connections (forwarding sandbox requests), it uses that namespace's routing table — not the host's default routing table.
+
+The host's primary external IP (e.g. `10.0.0.5`, resolved by `ip route get 1.1.1.1`) is typically only routable from the host's default namespace. From inside the Docker bridge namespace, the only reachable host address is the bridge gateway: `172.18.0.1`.
+
+**Fix:**
+
+`install.sh` resolves `172.18.0.1` first by attempting to bind a socket to it. If you applied the policy manually with the wrong IP, re-render and re-apply it:
+
+```bash
+# Confirm 172.18.0.1 is live on this host
+ip addr show | grep 172.18.0.1
+
+# Update server_url.txt in the sandbox
+echo "http://172.18.0.1:9004" | openshell sandbox exec -n my-assistant -- \
+  tee /sandbox/.openclaw/workspace/skills/haystack-rag-skills/server_url.txt
+
+# Re-apply the egress policy with the correct IP
+HOST_IP=172.18.0.1 RAG_PORT=9004
+sed "s/__HOST_IP__/$HOST_IP/g; s/__RAG_PORT__/$RAG_PORT/g" \
+  policy/haystack-rag-egress.yaml > /tmp/haystack-rag-egress-rendered.yaml
+nemoclaw my-assistant policy-add --from-file /tmp/haystack-rag-egress-rendered.yaml
+```
+
+Or simply re-run `install.sh` — it re-resolves the correct IP and re-applies everything.
+
+---
+
+### Competing restart loops from stale `install.sh` processes
+
+**Symptom:**
+
+After running `bash install.sh` a second time (or after killing and restarting it), the RAG server enters a rapid crash loop. Logs (`/tmp/haystack-rag.log`) show:
+
+```
+python: can't open file 'haystack_rag_server.py': [Errno 2] No such file or directory
+[haystack-rag] Server exited, restarting in 2s...
+[haystack-rag] Server exited, restarting in 2s...
+```
+
+**Root cause:**
+
+`install.sh` spawns a background `while true` restart loop for the server. If you run `install.sh` again without killing the previous instance, two overlapping loops exist simultaneously. Each loop's first action is `kill $(lsof -t -i:9004)` — which kills the server the *other* loop just started. The two loops race to kill and restart the server indefinitely.
+
+Additionally, if the CWD inside the subshell drifts (e.g. because a subshell `cd` failed or was missing), the relative path `python haystack_rag_server.py` fails with "No such file or directory".
+
+**Fix:**
+
+Kill all stale install.sh processes before restarting:
+
+```bash
+# Kill all background install.sh restart loops
+pkill -f "bash.*install.sh" 2>/dev/null || true
+# Also clear the port
+kill $(lsof -t -i:9004) 2>/dev/null || true
+# Then reinstall fresh
+bash install.sh my-assistant
+```
+
+The absolute path fix (`python "$SCRIPT_DIR/haystack_rag_server.py"`) in the restart loop ensures the server can be started from any CWD — this is already baked into `install.sh`.
+
+---
+
+### Wrong query subcommand syntax: `--question` is not a top-level flag
+
+**Symptom:**
+
+Running either of these commands fails:
+
+```bash
+# Wrong 1 — --question before the subcommand
+python3 haystack_client.py --question "what is haystack"
+# error: unrecognized arguments: --question
+
+# Wrong 2 — using --query instead of --question
+python3 haystack_client.py query --query "what is haystack"
+# error: unrecognized arguments: --query
+```
+
+**Root cause:**
+
+`haystack_client.py` uses an argparse subcommand structure. `query` is a subcommand, and `--question` is an argument specific to that subcommand. Placing `--question` before `query` gives it to the top-level parser (which doesn't know the flag). `--query` was a SKILL.md typo that has since been corrected to `--question`.
+
+**Correct syntax:**
+
+```bash
+# Resolve SKILL_DIR first
+for _c in /sandbox/.openclaw/workspace/skills/haystack-rag-skills \
+           /sandbox/.openclaw-data/workspace/skills/haystack-rag-skills \
+           "$HOME/.openclaw/workspace/skills/haystack-rag-skills"; do
+  [ -d "$_c" ] && SKILL_DIR="$_c" && break
+done
+
+# The subcommand comes first, then its flag
+$SKILL_DIR/venv/bin/python3 $SKILL_DIR/scripts/haystack_client.py query --question "what is haystack"
+```
+
+**Quick reference — all valid subcommands:**
+
+```bash
+python3 haystack_client.py health
+python3 haystack_client.py setup
+python3 haystack_client.py index
+python3 haystack_client.py query --question "YOUR QUESTION" [--top-k 5]
+python3 haystack_client.py list-documents
+```
+
+---
+
+### Agent answers from general knowledge instead of running the skill
+
+**Symptom:**
+
+The OpenClaw TUI agent responds to Haystack/RAG queries from its training data instead of executing `haystack_client.py`. For example:
+
+- `"tell me what is haystack"` → agent writes a paragraph from general knowledge; skill never runs
+- `"index document for me"` → agent replies "I'm not sure what you mean by 'index document'"
+- `"could you use the haystack-rag-skills you have..."` → agent describes the skill but never executes a command
+
+**Root cause:**
+
+The `description` field in `SKILL.md` frontmatter is the first (and often only) thing the agent reads when deciding whether and how to invoke a skill. If the description is polite and descriptive ("Answers questions about Haystack..."), the agent treats it as optional context and falls back to general knowledge. The body of SKILL.md is only read when the agent has already decided to invoke — so hard rules in the body don't help if the routing decision was wrong.
+
+The original SKILL.md description listed trigger topics but used no mandatory language. The agent saw "triggers on questions about haystack" as a hint, not a command.
+
+**Fix:**
+
+The SKILL.md description must include the word MANDATORY, copy-paste exec-ready commands, and explicit ANTI-PATTERNS in the description frontmatter itself — not just in the body. This mirrors the pattern used in the flight-tracking skill.
+
+Re-install the updated skill (which already uses this pattern):
+
+```bash
+# From the demo directory on the host
+nemoclaw my-assistant skill install ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills
+```
+
+Then force-write the new SKILL.md directly into the sandbox (see below — `nemoclaw skill install` may not overwrite an existing file in place):
+
+```bash
+B64=$(base64 -w0 ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills/SKILL.md)
+openshell sandbox exec -n my-assistant -- bash -c "echo '${B64}' | base64 -d > /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md && wc -l /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md"
+```
+
+Also populate `HEARTBEAT.md` so the agent gets a periodic skill-routing reminder (see below). Then reconnect the TUI: `exit` → `nemoclaw my-assistant connect` → `openclaw tui`.
+
+**Signs the fix worked:**
+
+After reconnecting and asking "tell me what is haystack", the agent should immediately run `health` (and `setup` if needed) then `query --question "what is haystack"` via the bash tool, and reply with the RAG-grounded answer citing `sample.txt`.
+
+---
+
+### Updating SKILL.md or HEARTBEAT.md in a live sandbox
+
+**Symptom:**
+
+After running `nemoclaw skill install`, the old SKILL.md is still in the sandbox (verified with `grep`). Or `openshell sandbox upload` fails:
+
+```
+mkdir: cannot create directory '.../SKILL.md': File exists
+Error: × ssh tar extract exited with status exit status: 1
+```
+
+**Root cause:**
+
+`nemoclaw skill install` uploads the skill files but may not overwrite files that already exist at the destination path on a live sandbox — it depends on the tar extraction mode. `openshell sandbox upload` with a file destination also fails when the destination path already exists as a file (it tries to `mkdir` the destination).
+
+**Fix 1 — base64 pipe (works for any text file, no sudo needed):**
+
+```bash
+# Write SKILL.md
+B64=$(base64 -w0 ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills/SKILL.md)
+openshell sandbox exec -n my-assistant -- bash -c \
+  "echo '${B64}' | base64 -d > /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md \
+   && wc -l /sandbox/.openclaw/workspace/skills/haystack-rag-skills/SKILL.md"
+```
+
+```bash
+# Write HEARTBEAT.md (workspace-level, not skill-level)
+B64=$(base64 -w0 /tmp/HEARTBEAT.md)
+openshell sandbox exec -n my-assistant -- bash -c \
+  "echo '${B64}' | base64 -d > /sandbox/.openclaw/workspace/HEARTBEAT.md"
+```
+
+**Fix 2 — upload to a temp path then move:**
+
+```bash
+openshell sandbox upload my-assistant /tmp/HEARTBEAT.md /tmp/HEARTBEAT_new.md
+openshell sandbox exec -n my-assistant -- mv /tmp/HEARTBEAT_new.md /sandbox/.openclaw/workspace/HEARTBEAT.md
+```
+
+**Fix 3 — delete the skill and reinstall:**
+
+```bash
+openshell sandbox exec -n my-assistant -- rm -rf /sandbox/.openclaw/workspace/skills/haystack-rag-skills
+nemoclaw my-assistant skill install ~/nemoclaw-demos/haystack-rag-demo/haystack-rag-skills
+```
+
+After any of these, restart the OpenClaw gateway and reconnect the TUI:
+
+```bash
+openshell sandbox exec -n my-assistant -- openclaw gateway restart
+# then reconnect:
+nemoclaw my-assistant connect
+```
+
+---
+
 ## File Structure
 
 ```
 haystack-rag-demo/
 ├── install.sh                          # One-command installer
 ├── haystack_rag_server.py              # Host-side FastAPI RAG server (port 9004)
+├── HEARTBEAT.md                        # Uploaded to sandbox workspace — periodic health check
 ├── .env.template                       # Configuration template — copy to .env
 ├── .env                                # Your local config (not committed)
 ├── haystack-rag-openclaw-guide.md      # This guide
@@ -436,7 +753,7 @@ haystack-rag-demo/
 ├── policy/
 │   └── sandbox_policy.yaml             # Network policy — haystack_rag_host on port 9004
 └── haystack-rag-skills/
-    ├── SKILL.md                        # OpenClaw skill definition
+    ├── SKILL.md                        # OpenClaw skill definition (mandatory-execution language)
     └── scripts/
         └── haystack_client.py          # HTTP client — calls /index, /query, /documents
 ```

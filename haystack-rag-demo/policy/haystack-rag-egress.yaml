@@ -1,17 +1,35 @@
-version: 1
+# Haystack RAG host-service egress preset.
+#
+# Lets the sandbox skill (haystack_client.py) reach the Haystack RAG server
+# running on the HOST at port __RAG_PORT__. NVIDIA_API_KEY never enters the
+# sandbox — all inference happens on the host side of this connection.
+#
+# IMPORTANT: __HOST_IP__ is a placeholder. install.sh renders it to the host's
+# real, non-loopback IP at apply time. Do NOT use host.openshell.internal /
+# host.docker.internal here — those names are not guaranteed to resolve to a
+# reachable host gateway inside the OpenShell sandbox network, and bypassing the
+# proxy also bypasses policy enforcement and audit.
+#
+# Applied with:  nemoclaw <sandbox> policy-add --from-file <rendered file>
+preset:
+  name: haystack-rag-host
+  description: "Haystack RAG server on the host (REST over HTTP, port __RAG_PORT__)"
 network_policies:
   haystack_rag_host:
-    # Allows the sandbox skill (haystack_client.py) to reach the Haystack RAG
-    # server running on the host at port 9004. NVIDIA_API_KEY never enters the
-    # sandbox — all inference happens on the host side of this connection.
     name: haystack_rag_host
     endpoints:
-      - host: host.openshell.internal
-        port: 9004
-        allowed_ips:
-          - 172.17.0.1
-      - host: 127.0.0.1
-        port: 9004
+      - host: __HOST_IP__
+        port: __RAG_PORT__
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/health" }
+          - allow: { method: POST, path: "/setup" }
+          - allow: { method: POST, path: "/index" }
+          - allow: { method: POST, path: "/query" }
+          - allow: { method: GET,  path: "/documents" }
+    # The proxy matches the binary that actually makes the outbound request.
+    # The skill runs through its own venv python, so list those paths.
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/local/bin/node }

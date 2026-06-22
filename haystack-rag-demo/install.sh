@@ -109,8 +109,55 @@ ok "ONBOARD_MODEL       : $NEMOCLAW_ONBOARD_MODEL  (used only for nemoclaw onboa
 ok "OPENCLAW_MODEL      : $OPENCLAW_MODEL"
 echo ""
 
+# ── Step 2b: Resolve the host IP the sandbox will reach ──────────
+# Per the NemoClaw guidance, the sandbox must reach the host service via the
+# host's REAL, non-loopback IP — NOT host.openshell.internal/host.docker.internal
+# (not a reliable host-service path) and NOT 127.0.0.1 (loopback inside the
+# sandbox). The server binds 0.0.0.0, so any host IP works; the OpenShell
+# gateway (on the host) proxies sandbox egress to this address after a policy
+# match. Override by exporting HOST_IP before running install.sh.
+info "Resolving host IP for sandbox egress..."
+# The OpenShell sandbox container routes outbound traffic through the sandbox
+# network bridge (172.18.0.0/16 by default, or 172.17.0.0/16 for docker0).
+# The sandbox proxy (openshell-sandbox) forwards allowed requests by making
+# TCP connections from WITHIN the sandbox network namespace — so the host IP
+# must be the bridge gateway reachable from that namespace, NOT the host's
+# primary external IP (which is only reachable in the host default namespace).
+#
+# Priority order:
+#  1. HOST_IP env var (user override)
+#  2. OpenShell sandbox bridge gateway (172.18.0.1) — most common
+#  3. Docker0 bridge gateway (172.17.0.1) — fallback
+#  4. Primary outbound IP via ip route — last resort
+_resolve_host_ip() {
+  local ip
+  # OpenShell sandbox bridge (standard NemoClaw default)
+  ip=$(python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('172.18.0.1',0)); print('172.18.0.1'); s.close()" 2>/dev/null || true)
+  # Docker0 bridge
+  [ -z "$ip" ] && ip=$(python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('172.17.0.1',0)); print('172.17.0.1'); s.close()" 2>/dev/null || true)
+  # Primary outbound source IP (last resort — may not be reachable from sandbox namespace)
+  [ -z "$ip" ] && ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  [ -z "$ip" ] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo "$ip"
+}
+HOST_IP="${HOST_IP:-$(_resolve_host_ip)}"
+[ -z "${HOST_IP:-}" ] && \
+  fail "Could not resolve the sandbox-reachable host IP. Export HOST_IP=<bridge-ip> and re-run."
+RAG_SERVER_URL="http://${HOST_IP}:${RAG_PORT}"
+ok "HOST_IP             : $HOST_IP  (sandbox reaches the RAG server at $RAG_SERVER_URL)"
+echo ""
+
 # ── Step 3: Install openclaw (if not already present) ────────────
 info "Checking openclaw installation..."
+
+# Host openclaw must match the sandbox Dockerfile pin (not npm "latest").
+_parse_dockerfile_openclaw_version() {
+  local dockerfile="$SCRIPT_DIR/Dockerfile"
+  [ -f "$dockerfile" ] || return 1
+  grep -m 1 '^ARG OPENCLAW_VERSION=' "$dockerfile" | sed 's/^ARG OPENCLAW_VERSION=//'
+}
+OPENCLAW_VERSION="$(_parse_dockerfile_openclaw_version || true)"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.22}"
 
 # openclaw installs via npm into whichever node runtime is active (nvm, system, etc.)
 # After installation we search common locations and add the containing dir to PATH.
@@ -122,7 +169,7 @@ _ensure_openclaw_path() {
   found=$(find \
     "$HOME/.nvm/versions" "$HOME/.local/bin" "$HOME/.cargo/bin" \
     /usr/local/bin /usr/bin \
-    -maxdepth 4 -name "openclaw" -type f 2>/dev/null | head -1 || true)
+    -maxdepth 6 -name "openclaw" -type f 2>/dev/null | head -1 || true)
   if [ -n "$found" ]; then
     export PATH="$(dirname "$found"):$PATH"
     return 0
@@ -130,14 +177,36 @@ _ensure_openclaw_path() {
   return 1
 }
 
-if ! _ensure_openclaw_path; then
-  info "openclaw not found — installing (--no-onboard)..."
-  curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-onboard
+_get_openclaw_version() {
+  openclaw --version 2>/dev/null | awk '{print $2}' || true
+}
+
+_install_openclaw_pinned() {
+  curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
+    bash -s -- --no-onboard --version "$OPENCLAW_VERSION"
+}
+
+_needs_openclaw_install() {
+  _ensure_openclaw_path || return 0
+  local cur_ver
+  cur_ver="$(_get_openclaw_version)"
+  [ -z "$cur_ver" ] && return 0
+  [ "$cur_ver" = "$OPENCLAW_VERSION" ] && return 1
+  return 0
+}
+
+if _needs_openclaw_install; then
+  if _ensure_openclaw_path; then
+    info "openclaw $(_get_openclaw_version) != sandbox pin $OPENCLAW_VERSION — reinstalling..."
+  else
+    info "openclaw not found — installing $OPENCLAW_VERSION (--no-onboard)..."
+  fi
+  _install_openclaw_pinned
   _ensure_openclaw_path || \
     fail "openclaw install failed. Run 'openclaw onboard' manually after adding its bin dir to PATH."
-  ok "openclaw installed"
+  ok "openclaw installed ($OPENCLAW_VERSION)"
 else
-  ok "openclaw already installed: $(openclaw --version 2>/dev/null | head -1 || echo 'version unknown')"
+  ok "openclaw already installed: $(_get_openclaw_version) (matches Dockerfile pin)"
 fi
 mkdir -p "$HOME/.openclaw"
 echo ""
@@ -230,11 +299,11 @@ fi
 
 (
   cd "$SCRIPT_DIR"
-  source .venv/bin/activate
+  source "$SCRIPT_DIR/.venv/bin/activate"
   export NVIDIA_API_KEY="$NVIDIA_API_KEY"
   while true; do
     kill $(lsof -t -i:"$RAG_PORT") 2>/dev/null || true
-    python haystack_rag_server.py \
+    python "$SCRIPT_DIR/haystack_rag_server.py" \
       --port "$RAG_PORT" \
       --store-path "$SCRIPT_DIR/data/store.json" \
       --data-dir "$SCRIPT_DIR/data/documents" || true
@@ -264,6 +333,44 @@ else
   else
     fail "RAG server process exited immediately. Check: cat $RAG_LOG_FILE"
   fi
+fi
+
+# Open the host firewall so the OpenShell sandbox container can reach the RAG server.
+# The openshell-sandbox container (172.18.0.0/16) makes outbound TCP connections
+# from within the Docker bridge network. By default the host's INPUT chain drops
+# traffic from Docker containers to host-side ports. We add explicit ACCEPT rules
+# for the two standard Docker bridge networks.
+# Using 'docker run --privileged' avoids needing the ubuntu user to have
+# passwordless sudo while still using root for iptables.
+_add_iptables_rule() {
+  local net="$1"
+  docker run --rm --privileged --network host python:3.12-alpine sh -c \
+    "apk add --quiet iptables 2>/dev/null; \
+     iptables -C INPUT -s ${net} -p tcp --dport ${RAG_PORT} -j ACCEPT 2>/dev/null || \
+     iptables -I INPUT -s ${net} -p tcp --dport ${RAG_PORT} -j ACCEPT" \
+    2>/dev/null && return 0
+  return 1
+}
+if command -v docker >/dev/null 2>&1; then
+  _add_iptables_rule "172.18.0.0/16" \
+    && ok "iptables: sandbox bridge (172.18.0.0/16) → port $RAG_PORT ACCEPT" \
+    || warn "iptables rule for 172.18.0.0/16 failed — may need: sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport $RAG_PORT -j ACCEPT"
+  _add_iptables_rule "172.17.0.0/16" \
+    && ok "iptables: docker0 bridge (172.17.0.0/16) → port $RAG_PORT ACCEPT" \
+    || warn "iptables rule for 172.17.0.0/16 failed — may need: sudo iptables -I INPUT -s 172.17.0.0/16 -p tcp --dport $RAG_PORT -j ACCEPT"
+else
+  warn "docker not found — add iptables rules manually if sandbox cannot reach host:"
+  warn "  sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport $RAG_PORT -j ACCEPT"
+fi
+
+# Confirm the server is reachable on the host's real IP, not just loopback.
+# This is the address the sandbox egress policy will target.
+if curl -s --max-time 3 "http://${HOST_IP}:${RAG_PORT}/health" >/dev/null 2>&1; then
+  ok "RAG server reachable at host IP: ${RAG_SERVER_URL}/health"
+else
+  warn "Server answers on 127.0.0.1 but NOT on ${HOST_IP}:${RAG_PORT}."
+  warn "The sandbox reaches the host via $HOST_IP — confirm the server binds 0.0.0.0"
+  warn "and that a host firewall isn't blocking port $RAG_PORT."
 fi
 echo ""
 
@@ -414,36 +521,47 @@ os.chmod(path, 0o600)
 " 2>/dev/null || true
 
 # ── Step 10: Apply sandbox network policy ───────────────────────
-# We use the minimal egress-only YAML (no filesystem_policy section) so we
-# don't conflict with filesystem rules added by nemoclaw onboard presets.
-# Try nemoclaw policy-add first (additive, won't touch filesystem rules);
-# fall back to openshell policy set if nemoclaw policy-add isn't available.
-EGRESS_POLICY="$SCRIPT_DIR/policy/haystack-rag-egress.yaml"
-info "Applying haystack_rag_host egress policy (port $RAG_PORT)..."
+# Render the egress preset template, substituting the host's real IP and port
+# for the __HOST_IP__ / __RAG_PORT__ placeholders, then apply it with the
+# documented `nemoclaw <sandbox> policy-add --from-file` command. This is an
+# additive preset (egress only, no filesystem rules) so it won't clobber the
+# filesystem presets added by nemoclaw onboard.
+EGRESS_TEMPLATE="$SCRIPT_DIR/policy/haystack-rag-egress.yaml"
+EGRESS_POLICY="$(mktemp /tmp/haystack-rag-egress.XXXXXX.yaml)"
+sed -e "s|__HOST_IP__|${HOST_IP}|g" -e "s|__RAG_PORT__|${RAG_PORT}|g" \
+  "$EGRESS_TEMPLATE" > "$EGRESS_POLICY"
+info "Applying haystack_rag_host egress policy (host $HOST_IP, port $RAG_PORT)..."
 POLICY_OK=false
 
-if nemoclaw "$SANDBOX_NAME" policy-add --policy "$EGRESS_POLICY" 2>/dev/null; then
-  ok "Policy applied via nemoclaw policy-add (haystack_rag_host egress on port $RAG_PORT)"
+if nemoclaw "$SANDBOX_NAME" policy-add --from-file "$EGRESS_POLICY" --yes 2>/dev/null; then
+  ok "Policy applied via nemoclaw policy-add --from-file (egress to $HOST_IP:$RAG_PORT)"
   POLICY_OK=true
 elif openshell policy set "$SANDBOX_NAME" \
      --policy "$EGRESS_POLICY" \
      --wait 2>/dev/null; then
-  ok "Policy applied via openshell policy set (haystack_rag_host egress on port $RAG_PORT)"
+  ok "Policy applied via openshell policy set (egress to $HOST_IP:$RAG_PORT)"
   POLICY_OK=true
 else
-  # Last resort: try the full policy file (may fail on live sandboxes with filesystem rules)
+  # Last resort: render + apply the full policy file (may fail on live sandboxes
+  # that already carry filesystem rules).
+  FULL_POLICY="$(mktemp /tmp/haystack-rag-sandbox.XXXXXX.yaml)"
+  sed -e "s|__HOST_IP__|${HOST_IP}|g" -e "s|__RAG_PORT__|${RAG_PORT}|g" \
+    "$SCRIPT_DIR/policy/sandbox_policy.yaml" > "$FULL_POLICY"
   openshell policy set "$SANDBOX_NAME" \
-    --policy "$SCRIPT_DIR/policy/sandbox_policy.yaml" \
+    --policy "$FULL_POLICY" \
     --wait 2>/dev/null \
     && ok "Policy applied via full sandbox_policy.yaml" \
     && POLICY_OK=true \
     || true
+  rm -f "$FULL_POLICY"
 fi
 
 if [ "$POLICY_OK" = false ]; then
-  warn "Could not apply egress policy — egress to port $RAG_PORT may be blocked."
+  warn "Could not apply egress policy — egress to $HOST_IP:$RAG_PORT may be blocked."
   warn "To fix manually, run:"
-  warn "  nemoclaw $SANDBOX_NAME policy-add --policy $EGRESS_POLICY"
+  warn "  nemoclaw $SANDBOX_NAME policy-add --from-file $EGRESS_POLICY"
+else
+  rm -f "$EGRESS_POLICY"
 fi
 echo ""
 
@@ -454,6 +572,10 @@ SKILL_SRC="$SCRIPT_DIR/haystack-rag-skills"
 # .openclaw-data/workspace/skills/. nemoclaw skill install picks the right path.
 SKILL_DEST="/sandbox/.openclaw/workspace/skills/$SKILL_NAME"
 SKILL_DEST_LEGACY="/sandbox/.openclaw-data/workspace/skills/$SKILL_NAME"
+# openshell sandbox upload places SRC *inside* DEST as a subdirectory, so the
+# fallback must target the parent skills/ dir — not the named skill subdir.
+SKILL_DEST_PARENT="/sandbox/.openclaw/workspace/skills"
+SKILL_DEST_LEGACY_PARENT="/sandbox/.openclaw-data/workspace/skills"
 
 enable_haystack_skill_registry() {
   openshell sandbox exec -n "$SANDBOX_NAME" -- python3 - <<'PYEOF'
@@ -523,23 +645,39 @@ resolve_skill_dest() {
   fi
 }
 
+info "Cleaning up stale skill installation in sandbox..."
+# Remove any previous install so we don't accumulate wrong content across runs.
+openshell sandbox exec -n "$SANDBOX_NAME" -- \
+  sh -c "rm -rf '$SKILL_DEST' '$SKILL_DEST_LEGACY'" 2>/dev/null || true
+ok "Stale skill directory removed"
+
 info "Installing $SKILL_NAME in sandbox..."
-if nemoclaw "$SANDBOX_NAME" skill install "$SKILL_SRC"; then
-  ok "Skill registered via nemoclaw skill install"
-else
-  warn "nemoclaw skill install failed — falling back to openshell upload"
-  openshell sandbox upload "$SANDBOX_NAME" \
+# nemoclaw skill install traverses up to the git root and uploads the entire
+# repo instead of just the skill directory — skip it and upload directly.
+# openshell upload places the source directory *inside* the destination, so
+# uploading $SKILL_SRC to $SKILL_DEST_PARENT lands it as skills/haystack-rag-skills/.
+openshell sandbox upload "$SANDBOX_NAME" \
+  "$SKILL_SRC" \
+  "$SKILL_DEST_PARENT" \
+  || openshell sandbox upload "$SANDBOX_NAME" \
     "$SKILL_SRC" \
-    "$SKILL_DEST" \
-    || openshell sandbox upload "$SANDBOX_NAME" \
-      "$SKILL_SRC" \
-      "$SKILL_DEST_LEGACY" \
-      || fail "Skill upload failed on both $SKILL_DEST and $SKILL_DEST_LEGACY"
-  ok "Skill uploaded (fallback path)"
-fi
+    "$SKILL_DEST_LEGACY_PARENT" \
+    || fail "Skill upload failed on both $SKILL_DEST_PARENT and $SKILL_DEST_LEGACY_PARENT"
+ok "Skill files uploaded to sandbox"
 
 SKILL_DEST="$(resolve_skill_dest)"
 ok "Skill path: $SKILL_DEST"
+
+# Tell the in-sandbox client which host IP/URL to call. haystack_client.py reads
+# this file (after --server-url flag and RAG_SERVER_URL env) so the skill talks
+# to the host's real IP instead of an unreliable host.openshell.internal name.
+if openshell sandbox exec -n "$SANDBOX_NAME" -- \
+     sh -c "printf '%s\n' '$RAG_SERVER_URL' > '$SKILL_DEST/server_url.txt'" 2>/dev/null; then
+  ok "Wrote server URL to sandbox: $SKILL_DEST/server_url.txt → $RAG_SERVER_URL"
+else
+  warn "Could not write server_url.txt — set RAG_SERVER_URL=$RAG_SERVER_URL in the sandbox,"
+  warn "or pass --server-url $RAG_SERVER_URL to haystack_client.py."
+fi
 
 # Boot openclaw once so it initializes openclaw.json, then patch it.
 # openclaw writes its default config on first start — we must let it do that
@@ -570,6 +708,44 @@ if [ "$ENABLE_OK" = false ]; then
   warn "    import json; p='/sandbox/.openclaw/openclaw.json';"
   warn "    d=json.load(open(p)); d.setdefault('skills',{}).setdefault('entries',{})['haystack-rag-skills']={'enabled':True};"
   warn "    json.dump(d,open(p,'w'))\""
+fi
+
+info "Uploading HEARTBEAT.md to sandbox workspace..."
+# HEARTBEAT.md gives the agent a periodic health check task and a mandatory
+# skill-routing reminder so it runs haystack_client.py instead of answering
+# Haystack/RAG questions from general knowledge.
+# We use base64 encode+decode because openshell sandbox exec rejects multi-line
+# command arguments, and openshell sandbox upload cannot overwrite an existing
+# file at the same path.
+HEARTBEAT_SRC="$SCRIPT_DIR/HEARTBEAT.md"
+WORKSPACE_HEARTBEAT="/sandbox/.openclaw/workspace/HEARTBEAT.md"
+WORKSPACE_HEARTBEAT_LEGACY="/sandbox/.openclaw-data/workspace/HEARTBEAT.md"
+
+if [ -f "$HEARTBEAT_SRC" ]; then
+  _upload_b64_file() {
+    local src="$1" dest="$2"
+    local b64
+    b64=$(base64 -w0 "$src")
+    openshell sandbox exec -n "$SANDBOX_NAME" -- \
+      bash -c "mkdir -p \$(dirname '$dest') && echo '${b64}' | base64 -d > '$dest' && echo ok" \
+      2>/dev/null
+  }
+  HB_RESULT=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_HEARTBEAT")
+  if [ "$HB_RESULT" = "ok" ]; then
+    ok "HEARTBEAT.md uploaded to $WORKSPACE_HEARTBEAT"
+  else
+    # Try the legacy path
+    HB_RESULT=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_HEARTBEAT_LEGACY")
+    if [ "$HB_RESULT" = "ok" ]; then
+      ok "HEARTBEAT.md uploaded to $WORKSPACE_HEARTBEAT_LEGACY"
+    else
+      warn "Could not upload HEARTBEAT.md — upload manually:"
+      warn "  openshell sandbox upload $SANDBOX_NAME $HEARTBEAT_SRC /tmp/HB.md"
+      warn "  openshell sandbox exec -n $SANDBOX_NAME -- mv /tmp/HB.md $WORKSPACE_HEARTBEAT"
+    fi
+  fi
+else
+  warn "HEARTBEAT.md not found at $HEARTBEAT_SRC — skipping workspace heartbeat upload"
 fi
 
 info "Restarting OpenClaw gateway inside sandbox (reload skills)..."
@@ -691,7 +867,8 @@ echo -e "${GREEN}  ╚═══════════════════�
 echo ""
 echo "  Sandbox    : $SANDBOX_NAME"
 echo "  Skill path : $SKILL_DEST"
-echo "  RAG server : http://127.0.0.1:${RAG_PORT}/health  (PID $(cat $RAG_PID_FILE 2>/dev/null || echo '?'))"
+echo "  RAG server : ${RAG_SERVER_URL}/health  (host IP — what the sandbox calls)"
+echo "             : http://127.0.0.1:${RAG_PORT}/health  (host-local, PID $(cat $RAG_PID_FILE 2>/dev/null || echo '?'))"
 echo "  Server logs: tail -f $RAG_LOG_FILE"
 echo "  Data dir   : $SCRIPT_DIR/data/documents  ← copy files here before indexing"
 if [ -n "${TOKEN:-}" ]; then
