@@ -23,28 +23,31 @@ The setup has two components:
 │                                                                 │
 │  NVIDIA_API_KEY lives here — never enters the sandbox           │
 │                                                                 │
-│  HOST BRIDGE  172.18.0.1  ← reachable from sandbox namespace   │
-│  (OpenShell sandbox bridge gateway — the address the sandbox    │
-│   proxy uses to make outbound forwarded connections)            │
+│  HOST BRIDGE  <BRIDGE_GATEWAY_IP>  ← reachable from sandbox    │
+│  (the Docker bridge gateway — varies by host; typically in      │
+│   the 172.16–172.31 range; resolved automatically by           │
+│   install.sh and written to server_url.txt)                     │
 └────────────────────────────────┬────────────────────────────────┘
                                  │  HTTP only, port 9004
                                  │  governed by haystack-rag-egress.yaml
                                  │  + host iptables INPUT ACCEPT rule
                                  │  (see Troubleshooting → proxy timeout)
 ┌────────────────────────────────┴────────────────────────────────┐
-│  SANDBOX (OpenShell, Docker bridge 172.18.0.0/16)              │
+│  SANDBOX (OpenShell, runs inside a Docker bridge network)       │
 │                                                                 │
 │  haystack-rag-skills/scripts/haystack_client.py                 │
 │  └── calls server endpoints (index / query / list-documents)    │
-│      via requests through OpenShell proxy at 10.200.0.1:3128   │
+│      via requests through OpenShell proxy at <PROXY_IP>:3128   │
 │      — zero NVIDIA API calls from sandbox                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+> **IP addresses in this diagram are machine-dependent.** `<BRIDGE_GATEWAY_IP>` is the Docker bridge gateway on your host (e.g. `172.18.0.1` or `172.17.0.1` — varies by Docker configuration). `<PROXY_IP>` is the OpenShell gateway address inside the sandbox user namespace (e.g. `10.200.0.1` — allocated by OpenShell, not Docker). Both are discovered and configured automatically by `install.sh`. You never need to hardcode them.
+
 **Why a host-side server instead of running Haystack directly in the sandbox?**
 The OpenShell sandbox strips `NVIDIA_API_KEY` from the environment by design — it cannot call `integrate.api.nvidia.com` directly. The host-side `haystack_rag_server.py` holds the key and runs all NVIDIA API calls. The sandbox skill is a thin HTTP client that calls the host server through an egress-approved port. This mirrors how the PST demo uses an MCP server, but uses plain JSON REST instead of MCP.
 
-> **Network note:** The sandbox proxy (`openshell-sandbox`) runs in the Docker bridge network namespace (`172.18.0.0/16`), **not** the host's default network namespace. The host's primary external IP (e.g. `10.0.0.5`) is not routable from this namespace. The correct `HOST_IP` is the bridge gateway `172.18.0.1`. Additionally, a host iptables INPUT rule is required to allow sandbox container traffic to reach the server on port 9004. `install.sh` handles both automatically — see [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) if you hit this manually.
+> **Network note:** The sandbox proxy runs inside a Docker bridge network, **not** the host's default network namespace. The host's primary external IP (the one returned by `ip route get 1.1.1.1`) is typically not routable from inside that namespace. The correct `HOST_IP` is the Docker bridge gateway (the `172.x.x.1` address on the bridge interface — found with `ip addr show | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."` on the host). A host iptables INPUT rule is also required so the Docker network can reach the server. `install.sh` resolves and configures both automatically — see [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-proxy-ip3128) if you hit this manually.
 
 ---
 
@@ -315,10 +318,12 @@ python3 haystack_client.py query --question "What is the main topic?" --top-k 8
 python3 haystack_client.py list-documents
 
 # Custom server URL. The default is read from <skill_dir>/server_url.txt, which
-# install.sh writes with the host's Docker bridge IP (172.18.0.1), the only host
-# address reachable from the sandbox network namespace (not 10.x.x.x).
+# install.sh writes with the host's Docker bridge gateway IP (the only host
+# address routable from the sandbox network namespace — not the primary host IP).
 # Override with --server-url or the RAG_SERVER_URL env var.
-python3 haystack_client.py --server-url http://172.18.0.1:9004 query --question "..."
+# To find your bridge IP: ip addr show | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."
+# Or just re-run install.sh — it auto-resolves and writes server_url.txt.
+python3 haystack_client.py --server-url http://<YOUR_BRIDGE_IP>:9004 query --question "..."
 ```
 
 > **Common syntax mistake:** `python3 haystack_client.py --question "..."` will fail with "unrecognized arguments". The `--question` flag belongs to the `query` subcommand, not the top-level parser. Always use `query --question "..."`. See [Troubleshooting → Wrong query subcommand syntax](#wrong-query-subcommand-syntax--question-is-not-a-top-level-flag) for details.
@@ -347,15 +352,16 @@ The host server runs with full access to `NVIDIA_API_KEY`, the filesystem, and t
 The `haystack_rag_host` policy block opens outbound HTTP from the sandbox to the
 host's Docker bridge gateway on port 9004 only, restricted to specific REST
 methods/paths and only from the skill venv's Python binary. `__HOST_IP__` is a
-placeholder that install.sh renders to `172.18.0.1` at apply time — **not**
-`10.x.x.x` or `host.openshell.internal`. The sandbox proxy runs in the Docker
-bridge namespace (`172.18.0.0/16`) and can only reach the bridge gateway:
+placeholder that `install.sh` renders to the bridge gateway IP at apply time —
+**not** the primary host IP or `host.openshell.internal`. The sandbox proxy runs
+inside the Docker bridge network and can only reach the bridge gateway address
+(typically a `172.x.x.1` address on the host's bridge interface):
 
 ```yaml
 network_policies:
   haystack_rag_host:
     endpoints:
-      - host: __HOST_IP__        # rendered to 172.18.0.1 (Docker bridge gateway)
+      - host: __HOST_IP__        # rendered by install.sh to your bridge gateway IP
         port: 9004
         protocol: rest
         enforcement: enforce
@@ -375,7 +381,7 @@ The preset is applied with the documented command:
 nemoclaw <sandbox> policy-add --from-file ./policy/haystack-rag-egress.yaml
 ```
 
-> **Important:** The OpenShell egress policy controls what the *sandbox* is allowed to request. It does **not** open the host's TCP port. The host iptables INPUT chain drops traffic from Docker containers by default — even if the OpenShell L7 engine marks the request `ALLOWED`, the TCP SYN is still dropped at the host. A second control is needed: an iptables ACCEPT rule for the Docker bridge network. `install.sh` adds this automatically via `docker run --privileged`. If you apply the policy manually without running the installer, you must also run: `sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT`. See [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) for the full diagnostic walkthrough.
+> **Important:** The OpenShell egress policy controls what the *sandbox* is allowed to request. It does **not** open the host's TCP port. The host iptables INPUT chain drops traffic from Docker containers by default — even if the OpenShell L7 engine marks the request `ALLOWED`, the TCP SYN is still dropped at the host. A second independent control is required: an iptables ACCEPT rule for the Docker bridge network. `install.sh` adds this automatically via `docker run --privileged`. If you apply the policy manually without running the installer, find your bridge CIDR (`ip route | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."`) and run: `sudo iptables -I INPUT -s <YOUR_BRIDGE_CIDR> -p tcp --dport 9004 -j ACCEPT`. See [Troubleshooting → Proxy timeout](#proxy-timeout-read-timed-out-at-proxy-ip3128) for the full diagnostic walkthrough.
 
 The `nvidia` policy block deliberately **does not** include the skill venv python binaries — skills cannot call NVIDIA directly even if they tried.
 
@@ -440,8 +446,8 @@ Then disconnect and reconnect the sandbox TUI.
 | Wrong inference model in TUI | `openshell inference set --provider nvidia --model nvidia/llama-3.3-nemotron-super-49b-v1.5` then reconnect. |
 | `openclaw: command not found` | If using nvm: `export PATH="$(dirname $(find ~/.nvm -name openclaw -type f 2>/dev/null \| head -1)):$PATH"` |
 | WebUI token not found | Token is at `.gateway.auth.token` in `~/.openclaw/openclaw.json` (see Step 3 / WebUI section). |
-| **`Read timed out (host='10.200.0.1', port=3128)`** — sandbox request hangs 120 s | Host iptables is dropping Docker bridge traffic. Apply: `sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT`. See [Proxy timeout](#proxy-timeout-read-timed-out-at-10200013128) for the full diagnostic. `install.sh` does this automatically. |
-| **Server unreachable from sandbox despite policy `ALLOWED`** — `10.x.x.x:9004` not routable | The sandbox proxy runs in the Docker bridge namespace; `10.x.x.x` host IPs are not routable from there. Use `172.18.0.1` as HOST_IP. `install.sh` resolves this automatically; if you applied the policy manually, re-render it with the correct IP. See [Wrong HOST_IP](#wrong-host_ip-host-primary-ip-is-not-routable-from-sandbox-namespace). |
+| **`Read timed out (host='<proxy-ip>', port=3128)`** — sandbox request hangs 120 s | Host iptables is dropping Docker bridge traffic. Find your bridge CIDR (`ip route | grep -E "172\.(1[6-9]\|2[0-9]\|3[01])\."`) then apply: `sudo iptables -I INPUT -s <BRIDGE_CIDR> -p tcp --dport 9004 -j ACCEPT`. See [Proxy timeout](#proxy-timeout-read-timed-out-at-proxy-ip3128) for the full diagnostic. `install.sh` does this automatically. |
+| **Server unreachable from sandbox despite policy `ALLOWED`** — primary host IP not routable | The sandbox proxy runs inside the Docker bridge network; the host's primary external IP is in a different namespace and not reachable. The correct HOST_IP is the Docker bridge gateway (`ip addr show | grep -E "172\.(1[6-9]\|2[0-9]\|3[01])\."`). `install.sh` resolves this automatically. See [Wrong HOST_IP](#wrong-host_ip-host-primary-ip-is-not-routable-from-sandbox-namespace). |
 | **Competing restart loops / server crash-loop** after running install.sh twice | Multiple `bash install.sh` processes leave overlapping background restart loops alive. Each kills the other's server. Fix: `pkill -f "bash.*install.sh"` then `bash install.sh`. See [Competing restart loops](#competing-restart-loops-from-stale-installsh-processes). |
 | **`error: unrecognized arguments: --question`** from `haystack_client.py` | `--question` belongs to the `query` subcommand, not the top-level parser. Wrong: `haystack_client.py --question "..."`. Right: `haystack_client.py query --question "..."`. See [Wrong query syntax](#wrong-query-subcommand-syntax--question-is-not-a-top-level-flag). |
 | **Agent answers Haystack / RAG questions from general knowledge instead of running the skill** | SKILL.md description lacked mandatory-execution language. Re-install the skill with the updated SKILL.md (see [Agent ignores skill](#agent-answers-from-general-knowledge-instead-of-running-the-skill)). |
@@ -474,82 +480,126 @@ bash install.sh
 
 ---
 
-### Proxy timeout: `Read timed out` at `10.200.0.1:3128`
+### Proxy timeout: `Read timed out` at `<proxy-ip>:3128`
+
+> **IP addresses here are machine-dependent.** The proxy IP shown in your error (e.g. `10.200.0.1`) and the bridge CIDR used in the fix (e.g. `172.18.0.0/16`) will differ on every host. Use the discovery commands below to find yours.
 
 **Symptom:**
 
 Running any `haystack_client.py` command from the sandbox produces:
 
 ```
-Unexpected error: HTTPConnectionPool(host='10.200.0.1', port=3128): Read timed out. (read timeout=120)
+Unexpected error: HTTPConnectionPool(host='<proxy-ip>', port=3128): Read timed out. (read timeout=120)
 ```
 
-**What `10.200.0.1:3128` is — and why it times out:**
+The `<proxy-ip>` shown is **your** OpenShell gateway's HTTP forward proxy address — allocated by OpenShell, not by Docker, so it varies per installation.
 
-`10.200.0.1:3128` is the OpenShell gateway's HTTP forward proxy inside the sandbox's user network namespace — **not** a corporate proxy. All sandbox HTTP traffic routes through it for L7 policy enforcement. When the sandbox makes a request to `http://172.18.0.1:9004`, the gateway inspects it, marks it `ALLOWED` (if the egress policy permits), and then makes an outbound TCP connection from the Docker bridge network namespace to `172.18.0.1:9004`.
+**What the proxy IP is — and why it times out:**
 
-The timeout occurs because the host's iptables INPUT chain drops traffic arriving from Docker container source IPs (`172.18.0.0/16`), even for ports that have a running server. The OpenShell L7 engine allowing the request does **not** open the host's TCP port — these are independent controls. The gateway sends a TCP SYN, the host drops it silently (no RST), and after 120 s the client times out waiting.
+The proxy IP (e.g. `10.200.0.1` on one host, different on another) is the OpenShell gateway's HTTP forward proxy inside the sandbox's user network namespace — **not** a corporate proxy. All sandbox HTTP traffic routes through it for L7 policy enforcement. When the sandbox makes a request to the host RAG server, the gateway inspects it, marks it `ALLOWED` (if egress policy permits), then makes an outbound TCP connection from inside the Docker bridge network namespace to the host's bridge gateway IP.
 
-**How to confirm it's an iptables issue:**
+The timeout occurs because the host's iptables INPUT chain drops traffic arriving from Docker container source IPs by default — even for ports that have a running server. The OpenShell L7 engine marking the request `ALLOWED` does **not** open the host's TCP port — these are two independent controls. The gateway sends a TCP SYN, the host drops it silently (no RST), and after 120 s the client times out.
 
-From the sandbox, hit a port that is definitely policy-denied:
+**Concept: two independent gates, both must be open**
 
-```bash
-openshell sandbox exec -n my-assistant -- curl --max-time 5 http://172.18.0.1:9005/
-# → immediate: {"error":"policy_denied"}
+```
+Sandbox request → OpenShell L7 proxy (gate 1: egress policy) → host iptables (gate 2: INPUT chain)
+                       ALLOWED ✓                                    DROPPED ✗  ← this is the bug
 ```
 
-If port 9004 times out while port 9005 is instantly denied, the OpenShell proxy is responding — but the TCP connection to port 9004 is being silently dropped by the host, not by the proxy.
+A `Read timed out` at the proxy IP means gate 1 passed but gate 2 dropped the packet.
+An immediate `{"error":"policy_denied"}` means gate 1 blocked it — different problem.
 
-**Fix:**
+**How to confirm it's an iptables issue (not a policy issue):**
+
+Find the host's bridge gateway IP and a policy-denied port to test against:
 
 ```bash
-# Option 1 — if you have sudo on the host
-sudo iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT
+# On the host — find your bridge gateway IP
+ip addr show | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."
+# Example output: inet 172.18.0.1/16 brd 172.18.255.255 scope global docker0
+# → your bridge gateway is 172.18.0.1 (yours may differ)
 
-# Option 2 — if the ubuntu user is in the docker group (no sudo needed)
+# From the sandbox — hit a port that is definitely policy-denied
+openshell sandbox exec -n my-assistant -- curl --max-time 5 http://<YOUR_BRIDGE_GATEWAY>:9005/
+# → immediate {"error":"policy_denied"}  ← proxy is alive, responded instantly
+```
+
+If port 9004 times out but a policy-denied port responds instantly, the proxy is working — the host is silently dropping the TCP SYN for port 9004.
+
+**Fix — find your bridge CIDR and add the iptables rule:**
+
+```bash
+# Step 1: find your Docker bridge CIDR on the host
+ip route | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."
+# Example: 172.18.0.0/16 dev docker0 → your CIDR is 172.18.0.0/16
+
+# Step 2a — with sudo
+sudo iptables -I INPUT -s <YOUR_BRIDGE_CIDR> -p tcp --dport 9004 -j ACCEPT
+
+# Step 2b — if you're in the docker group (no sudo needed)
 docker run --rm --privileged --network host alpine sh -c \
-  "apk add --quiet iptables && iptables -I INPUT -s 172.18.0.0/16 -p tcp --dport 9004 -j ACCEPT"
+  "apk add --quiet iptables && iptables -I INPUT -s <YOUR_BRIDGE_CIDR> -p tcp --dport 9004 -j ACCEPT"
 ```
 
-Verify from the sandbox:
+**Verify from the sandbox:**
 
 ```bash
-openshell sandbox exec -n my-assistant -- curl -s --max-time 10 http://172.18.0.1:9004/health
+openshell sandbox exec -n my-assistant -- curl -s --max-time 10 http://<YOUR_BRIDGE_GATEWAY>:9004/health
 # → {"status":"ok","indexed_chunks":0,...}
 ```
 
-`install.sh` adds this iptables rule automatically (via the `docker run --privileged` method) so you normally never hit this manually. If you applied only the egress policy without running the installer, this is the missing step.
+`install.sh` discovers the bridge CIDR and adds this rule automatically (via `docker run --privileged`), so you normally never hit this manually. If you applied only the egress policy by hand without running the installer, this is the missing step.
 
 ---
 
 ### Wrong HOST_IP: host primary IP is not routable from sandbox namespace
 
+> **IP addresses here are machine-dependent.** Your primary host IP and bridge gateway IP will differ from any example shown. Use the discovery commands below to find yours.
+
 **Symptom:**
 
-After `install.sh`, the `server_url.txt` file contains something like `http://10.0.0.5:9004` and sandbox requests either time out or return connection errors, even with a valid policy.
+After `install.sh`, the `server_url.txt` file contains the host's primary external IP (e.g. `http://10.x.x.x:9004` or `http://192.168.x.x:9004`) and sandbox requests either time out or return connection errors, even with a valid egress policy.
 
-**Root cause:**
+**Root cause — two network namespaces, two routing tables:**
 
-The openshell-sandbox proxy process runs in a Docker bridge network namespace (`172.18.0.0/16`). When it makes outbound connections (forwarding sandbox requests), it uses that namespace's routing table — not the host's default routing table.
+The OpenShell sandbox proxy process runs inside the Docker bridge network (a separate Linux network namespace). When it forwards sandbox requests outbound, it uses **that namespace's routing table** — not the host's default one.
 
-The host's primary external IP (e.g. `10.0.0.5`, resolved by `ip route get 1.1.1.1`) is typically only routable from the host's default namespace. From inside the Docker bridge namespace, the only reachable host address is the bridge gateway: `172.18.0.1`.
+The host's primary external IP (discovered by `ip route get 1.1.1.1` in the host's default namespace) is not reachable from inside the Docker bridge namespace. The only host address reachable from inside the Docker network is the **bridge gateway** — the `172.x.x.1` (or similar) address assigned to the host end of the Docker bridge interface.
+
+```
+Host default namespace:   eth0 = 10.x.x.x  ← NOT routable from sandbox proxy
+Docker bridge namespace:  bridge gateway = 172.x.x.1  ← ROUTABLE from sandbox proxy
+```
+
+**How to find the correct HOST_IP on your machine:**
+
+```bash
+# On the host — list bridge interfaces and their gateway IPs
+ip addr show | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."
+# Example output: inet 172.18.0.1/16 brd 172.18.255.255 scope global docker0
+# → your correct HOST_IP is 172.18.0.1
+
+# Alternative: list routes — the bridge network has a direct route
+ip route | grep -E "172\.(1[6-9]|2[0-9]|3[01])\."
+# Example: 172.18.0.0/16 dev docker0 → gateway is 172.18.0.1
+```
 
 **Fix:**
 
-`install.sh` resolves `172.18.0.1` first by attempting to bind a socket to it. If you applied the policy manually with the wrong IP, re-render and re-apply it:
+`install.sh` resolves the bridge gateway automatically by trying to bind a socket to candidate bridge addresses in priority order. If you applied the policy manually with the wrong IP, correct it:
 
 ```bash
-# Confirm 172.18.0.1 is live on this host
-ip addr show | grep 172.18.0.1
+# Find your correct bridge gateway IP (see above)
+HOST_IP=$(ip route | grep -E "172\.(1[6-9]|2[0-9]|3[01])\." | awk '{print $1}' | sed 's|\(.*\)\.[0-9]*/.*|\1.1|' | head -1)
+echo "Bridge gateway: $HOST_IP"
 
 # Update server_url.txt in the sandbox
-echo "http://172.18.0.1:9004" | openshell sandbox exec -n my-assistant -- \
+echo "http://${HOST_IP}:9004" | openshell sandbox exec -n my-assistant -- \
   tee /sandbox/.openclaw/workspace/skills/haystack-rag-skills/server_url.txt
 
 # Re-apply the egress policy with the correct IP
-HOST_IP=172.18.0.1 RAG_PORT=9004
-sed "s/__HOST_IP__/$HOST_IP/g; s/__RAG_PORT__/$RAG_PORT/g" \
+sed "s/__HOST_IP__/${HOST_IP}/g; s/__RAG_PORT__/9004/g" \
   policy/haystack-rag-egress.yaml > /tmp/haystack-rag-egress-rendered.yaml
 nemoclaw my-assistant policy-add --from-file /tmp/haystack-rag-egress-rendered.yaml
 ```
@@ -743,10 +793,16 @@ nemoclaw my-assistant connect
 haystack-rag-demo/
 ├── install.sh                          # One-command installer
 ├── haystack_rag_server.py              # Host-side FastAPI RAG server (port 9004)
-├── HEARTBEAT.md                        # Uploaded to sandbox workspace — periodic health check
+├── HEARTBEAT.md                        # Uploaded → sandbox workspace/HEARTBEAT.md
 ├── .env.template                       # Configuration template — copy to .env
 ├── .env                                # Your local config (not committed)
 ├── haystack-rag-openclaw-guide.md      # This guide
+├── workspace/                          # Uploaded → /sandbox/.openclaw/workspace/
+│   ├── AGENTS.md                       # Agent workspace rules + skill routing + bash permission
+│   ├── TOOLS.md                        # Bash tool + haystack-rag-skills commands (critical)
+│   ├── SOUL.md                         # "Run first, explain after" execution philosophy
+│   ├── IDENTITY.md                     # Agent name and purpose
+│   └── USER.md                         # User context and preferences
 ├── data/
 │   ├── documents/                      # ← drop your .txt / .md / .pdf files here
 │   └── store.json                      # Auto-created on first index run

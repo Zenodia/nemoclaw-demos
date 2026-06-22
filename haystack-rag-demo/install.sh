@@ -710,43 +710,72 @@ if [ "$ENABLE_OK" = false ]; then
   warn "    json.dump(d,open(p,'w'))\""
 fi
 
-info "Uploading HEARTBEAT.md to sandbox workspace..."
-# HEARTBEAT.md gives the agent a periodic health check task and a mandatory
-# skill-routing reminder so it runs haystack_client.py instead of answering
-# Haystack/RAG questions from general knowledge.
+info "Uploading workspace configuration files to sandbox..."
+# Upload demo-specific AGENTS.md, TOOLS.md, SOUL.md, IDENTITY.md, USER.md,
+# and HEARTBEAT.md to the sandbox workspace. These replace the generic OpenClaw
+# defaults with files that:
+#   - Explicitly tell the agent it has bash/shell execution (TOOLS.md, AGENTS.md)
+#   - Document the haystack-rag-skills location and commands (TOOLS.md)
+#   - Give the agent purpose-specific identity and soul (IDENTITY.md, SOUL.md)
+#   - Add a periodic health check + skill-routing reminder (HEARTBEAT.md)
+#
 # We use base64 encode+decode because openshell sandbox exec rejects multi-line
 # command arguments, and openshell sandbox upload cannot overwrite an existing
 # file at the same path.
-HEARTBEAT_SRC="$SCRIPT_DIR/HEARTBEAT.md"
-WORKSPACE_HEARTBEAT="/sandbox/.openclaw/workspace/HEARTBEAT.md"
-WORKSPACE_HEARTBEAT_LEGACY="/sandbox/.openclaw-data/workspace/HEARTBEAT.md"
 
-if [ -f "$HEARTBEAT_SRC" ]; then
-  _upload_b64_file() {
-    local src="$1" dest="$2"
-    local b64
-    b64=$(base64 -w0 "$src")
-    openshell sandbox exec -n "$SANDBOX_NAME" -- \
-      bash -c "mkdir -p \$(dirname '$dest') && echo '${b64}' | base64 -d > '$dest' && echo ok" \
-      2>/dev/null
-  }
-  HB_RESULT=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_HEARTBEAT")
-  if [ "$HB_RESULT" = "ok" ]; then
-    ok "HEARTBEAT.md uploaded to $WORKSPACE_HEARTBEAT"
+WORKSPACE_SRC="$SCRIPT_DIR/workspace"
+WORKSPACE_DEST="/sandbox/.openclaw/workspace"
+WORKSPACE_DEST_LEGACY="/sandbox/.openclaw-data/workspace"
+
+_upload_b64_file() {
+  local src="$1" dest="$2"
+  local b64
+  b64=$(base64 -w0 "$src")
+  openshell sandbox exec -n "$SANDBOX_NAME" -- \
+    bash -c "mkdir -p \$(dirname '$dest') && echo '${b64}' | base64 -d > '$dest' && echo ok" \
+    2>/dev/null
+}
+
+_upload_workspace_file() {
+  local fname="$1"
+  local src="$WORKSPACE_SRC/$fname"
+  [ -f "$src" ] || { warn "workspace/$fname not found — skipping"; return; }
+  local result
+  result=$(_upload_b64_file "$src" "$WORKSPACE_DEST/$fname")
+  if [ "$result" = "ok" ]; then
+    ok "workspace/$fname → $WORKSPACE_DEST/$fname"
   else
-    # Try the legacy path
-    HB_RESULT=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_HEARTBEAT_LEGACY")
-    if [ "$HB_RESULT" = "ok" ]; then
-      ok "HEARTBEAT.md uploaded to $WORKSPACE_HEARTBEAT_LEGACY"
+    result=$(_upload_b64_file "$src" "$WORKSPACE_DEST_LEGACY/$fname")
+    if [ "$result" = "ok" ]; then
+      ok "workspace/$fname → $WORKSPACE_DEST_LEGACY/$fname"
     else
-      warn "Could not upload HEARTBEAT.md — upload manually:"
-      warn "  openshell sandbox upload $SANDBOX_NAME $HEARTBEAT_SRC /tmp/HB.md"
-      warn "  openshell sandbox exec -n $SANDBOX_NAME -- mv /tmp/HB.md $WORKSPACE_HEARTBEAT"
+      warn "Could not upload workspace/$fname — upload manually:"
+      warn "  B64=\$(base64 -w0 $src)"
+      warn "  openshell sandbox exec -n $SANDBOX_NAME -- bash -c \"echo '\$B64' | base64 -d > $WORKSPACE_DEST/$fname\""
     fi
   fi
+}
+
+# Upload HEARTBEAT.md from demo root (not workspace/ subdir)
+HEARTBEAT_SRC="$SCRIPT_DIR/HEARTBEAT.md"
+if [ -f "$HEARTBEAT_SRC" ]; then
+  result=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_DEST/HEARTBEAT.md")
+  if [ "$result" = "ok" ]; then
+    ok "HEARTBEAT.md → $WORKSPACE_DEST/HEARTBEAT.md"
+  else
+    result=$(_upload_b64_file "$HEARTBEAT_SRC" "$WORKSPACE_DEST_LEGACY/HEARTBEAT.md")
+    [ "$result" = "ok" ] \
+      && ok "HEARTBEAT.md → $WORKSPACE_DEST_LEGACY/HEARTBEAT.md" \
+      || warn "HEARTBEAT.md upload failed — see troubleshooting guide"
+  fi
 else
-  warn "HEARTBEAT.md not found at $HEARTBEAT_SRC — skipping workspace heartbeat upload"
+  warn "HEARTBEAT.md not found at $HEARTBEAT_SRC — skipping"
 fi
+
+# Upload all workspace configuration files
+for _wf in AGENTS.md TOOLS.md SOUL.md IDENTITY.md USER.md; do
+  _upload_workspace_file "$_wf"
+done
 
 info "Restarting OpenClaw gateway inside sandbox (reload skills)..."
 if restart_sandbox_openclaw 2>/dev/null; then
